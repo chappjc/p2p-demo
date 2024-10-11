@@ -76,6 +76,13 @@ func getTx(ctx context.Context, txid string, peer peer.ID, host host.Host) ([]by
 	return resp, nil
 }
 
+func (txi *transactionIndex) have(txid string) bool {
+	txi.mtx.RLock()
+	defer txi.mtx.RUnlock()
+	_, have := txi.txids[txid]
+	return have
+}
+
 func (txi *transactionIndex) storeTx(txid string, raw []byte) {
 	txi.mtx.Lock()
 	defer txi.mtx.Unlock()

@@ -51,14 +51,21 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 			}
 
 			if string(txMsg.From) == string(me) {
-				return
+				fmt.Println("message from me ignored")
+				continue
 			}
 
-			fmt.Printf("received tx msg from %v (rcvd from %s), data = %x\n",
-				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data)
+			txid := hex.EncodeToString(txMsg.Data)
+
+			have := txi.have(txid)
+			fmt.Printf("received tx msg from %v (rcvd from %s), data = %x, already have = %v\n",
+				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data, have)
+			if have {
+				continue
+			}
 
 			// Now we use getTx with the ProtocolIDTransaction stream
-			txid := hex.EncodeToString(txMsg.Data)
+			fmt.Println("fetching tx", txid)
 			txRaw, err := getTx(ctx, txid, txMsg.GetFrom(), host)
 			if err != nil {
 				fmt.Println("getTx:", err)
