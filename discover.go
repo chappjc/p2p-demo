@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/discovery"
@@ -45,50 +46,75 @@ func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 		}
 	}
 
-	fmt.Println("done sending peers on stream", s.ID())
+	// fmt.Println("done sending peers on stream", s.ID())
 }
 
 // func (pm *peerMan) Advertise(ctx context.Context, ns string, opts ...discovery.Option) (time.Duration, error) {
 // 	return 0, nil
 // }
 
+func (pm *peerMan) requestPeers(ctx context.Context, peerID peer.ID) ([]peer.AddrInfo, error) {
+	if peerID == pm.h.ID() {
+		return nil, nil
+	}
+
+	stream, err := pm.h.NewStream(ctx, peerID, ProtocolIDDiscover)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream: %w", err)
+	}
+	defer stream.Close()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(5 * time.Second)
+	}
+
+	stream.SetDeadline(deadline)
+
+	requestMessage := discoverPeersMsg
+	if _, err := stream.Write([]byte(requestMessage + "\n")); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	var peers []peer.AddrInfo
+	if err := readPeersFromStream(stream, &peers); err != nil {
+		return nil, fmt.Errorf("failed to read peers from stream: %w", err)
+	}
+	return peers, nil
+}
+
 func (pm *peerMan) FindPeers(ctx context.Context, ns string, opts ...discovery.Option) (<-chan peer.AddrInfo, error) {
 	peerChan := make(chan peer.AddrInfo)
 
-	go func() {
-		defer close(peerChan)
-		for _, peerID := range pm.h.Network().Peers() {
-			if peerID == pm.h.ID() {
-				continue // Skip self
-			}
+	peers := pm.h.Network().Peers()
+	if len(peers) == 0 {
+		close(peerChan)
+		fmt.Println("no existing peers for peer discovery")
+		return peerChan, nil
+	}
 
-			streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	var wg sync.WaitGroup
+	wg.Add(len(peers))
+	for _, peerID := range peers {
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			stream, err := pm.h.NewStream(streamCtx, peerID, ProtocolIDDiscover)
+			peers, err := pm.requestPeers(ctx, peerID)
 			if err != nil {
-				fmt.Println("Failed to open stream:", err)
-				continue
-			}
-			defer stream.Close()
-
-			stream.SetDeadline(time.Now().Add(5 * time.Second))
-
-			requestMessage := discoverPeersMsg
-			if _, err := stream.Write([]byte(requestMessage + "\n")); err != nil {
-				fmt.Println("Failed to send request:", err)
-				continue
-			}
-
-			var peers []peer.AddrInfo
-			if err := readPeersFromStream(stream, &peers); err != nil {
-				fmt.Println("Failed to read peers from stream:", err)
-				continue
+				fmt.Printf("Failed to get peers from %v: %v", peerID, err)
+				return
 			}
 
 			for _, p := range peers {
 				peerChan <- p
 			}
-		}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(peerChan)
 	}()
 
 	return peerChan, nil

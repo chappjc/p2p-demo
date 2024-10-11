@@ -136,20 +136,11 @@ func run(ctx context.Context) error {
 			return err
 		}
 		fmt.Println("connected to ", peerInfo)
-
-		// rawTx, err := getTx(ctx, testTxid, peerInfo.ID, host)
-		// if err != nil {
-		// 	fmt.Println("getTx:", err)
-		// } else {
-		// 	fmt.Printf("rawTx: %x\n", rawTx)
-		// }
 	} // else would use persistent peer store (address book)
 
 	// peer discovery protocol stream handler
 	pm := &peerMan{h: host}
 	host.SetStreamHandler(ProtocolIDDiscover, pm.discoveryStreamHandler)
-
-	// backoff.NewBackoffDiscovery(pm, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
