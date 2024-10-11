@@ -71,7 +71,10 @@ func run(ctx context.Context) error {
 	privKey, _, _ := crypto.GenerateECDSAKeyPair(rr)
 	ecdsaPrivKey := privKey.(*crypto.ECDSAPrivateKey)
 	rawKey, _ := crypto.MarshalECDSAPrivateKey(*ecdsaPrivKey)
-	fmt.Printf("key: %x\n", rawKey)
+	fmt.Printf("priv key: %x\n", rawKey)
+	pubKey := privKey.GetPublic()
+	rawPub, _ := pubKey.Raw()
+	fmt.Printf("pub key:  %x\n", rawPub)
 
 	// ecdsaPrivKey, err := crypto.UnmarshalECDSAPrivateKey(rawKey)
 	// if err != nil {
@@ -122,7 +125,9 @@ func run(ctx context.Context) error {
 	host.SetStreamHandler(ProtocolIDTransaction, txi.txStreamHandler)
 	// host.SetStreamHandler(ProtocolIDBlock, txi.blockStreamHandler)
 
-	fmt.Println(host.Peerstore().Peers())
+	if err = startTxGossip(ctx, host); err != nil {
+		return err
+	}
 
 	// connect to bootstrap peer, if any
 	if connectTo != "" {
@@ -139,8 +144,6 @@ func run(ctx context.Context) error {
 		}
 	} // else would use persistent peer store (address book)
 
-	fmt.Println(host.Peerstore().Peers())
-
 	// peer discovery protocol stream handler
 	pm := &peerMan{h: host}
 	host.SetStreamHandler(ProtocolIDDiscover, pm.discoveryStreamHandler)
@@ -152,7 +155,6 @@ func run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		for {
-			fmt.Println(host.Peerstore().Peers())
 			// discover for this node
 			peerChan, err := pm.FindPeers(ctx, "kwil_namespace")
 			if err != nil {
@@ -163,7 +165,6 @@ func run(ctx context.Context) error {
 					for peer := range peerChan {
 						addPeerToPeerStore(host, peer)
 					}
-					// fmt.Println("done with FindPeers")
 				}()
 			}
 
@@ -182,7 +183,7 @@ func run(ctx context.Context) error {
 	return host.Close()
 }
 
-func checkProtocolSupport(ctx context.Context, h host.Host, peerID peer.ID, protoID protocol.ID) (bool, error) {
+func checkProtocolSupport(_ context.Context, h host.Host, peerID peer.ID, protoID protocol.ID) (bool, error) {
 	// Check if the peer supports the specified protocol
 	supportedProtos, err := h.Peerstore().GetProtocols(peerID)
 	if err != nil {
