@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -14,7 +15,7 @@ const (
 	TopicTxs = "txs"
 )
 
-func startTxGossip(ctx context.Context, host host.Host) error {
+func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) error {
 	_, topicTx, subTx, err := subTxs(ctx, host)
 	if err != nil {
 		return err
@@ -29,6 +30,7 @@ func startTxGossip(ctx context.Context, host host.Host) error {
 			}
 
 			txid := randBytes(32)
+			txi.storeTx(hex.EncodeToString(txid), randBytes(10))
 			fmt.Printf("announcing txid %x\n", txid)
 			err := topicTx.Publish(ctx, txid)
 			if err != nil {
@@ -52,19 +54,21 @@ func startTxGossip(ctx context.Context, host host.Host) error {
 				return
 			}
 
-			// if txMsg.Local {
-			// 	continue
-			// }
+			fmt.Printf("received tx msg from %v (rcvd from %s), data = %x\n",
+				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data)
 
-			fmt.Printf("received tx msg from %x (rcvd from %s), data = %x\n",
-				txMsg.From, txMsg.ReceivedFrom, txMsg.Data)
+			// Now we use getTx with the ProtocolIDTransaction stream
+			txid := hex.EncodeToString(txMsg.Data)
+			txRaw, err := getTx(ctx, txid, txMsg.GetFrom(), host)
+			if err != nil {
+				fmt.Println("getTx:", err)
+				continue
+			}
+			txi.storeTx(txid, txRaw)
 
 			// txMsg.ID
 			// txMsg.ReceivedFrom
 			// txMsg.ValidatorData
-			// txMsg.Local
-
-			// fmt.Printf("msg.Data: %x\n", txMsg.Message.Data)
 			// txMsg.Message.Signature
 		}
 	}()
@@ -91,25 +95,6 @@ func subTxs(ctx context.Context, host host.Host) (*pubsub.PubSub, *pubsub.Topic,
 	}
 	return ps, topic, sub, nil
 }
-
-/*
-	if err := topic.Publish(ctx, data); err != nil {
-		fmt.Println("Failed to publish peer info:", err)
-	}
-	time.Sleep(30 * time.Second) // Publish every 30 seconds
-*/
-
-/*
-go func() {
-	for {
-		msg, err := subscription.Next(ctx)
-		if err != nil {
-			fmt.Println("Failed to get message:", err)
-			return
-		}
-	}
-}()
-*/
 
 func randBytes(n int) []byte {
 	b := make([]byte, n)

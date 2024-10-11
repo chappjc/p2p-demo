@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -14,6 +15,7 @@ import (
 )
 
 type transactionIndex struct {
+	mtx   sync.RWMutex
 	txids map[string][]byte
 }
 
@@ -35,10 +37,6 @@ func (txi *transactionIndex) txStreamHandler(s network.Stream) {
 		fmt.Println("bad get tx request")
 		return
 	}
-	// if len(req) != 64 {
-	// 	fmt.Println("bad tx hash in request")
-	// 	return
-	// }
 	txid := string(req)
 	fmt.Printf("txid: %q\n", txid)
 	rawTx, have := txi.txids[txid]
@@ -75,9 +73,17 @@ func getTx(ctx context.Context, txid string, peer peer.ID, host host.Host) ([]by
 	if bytes.Equal(resp, []byte("0")) {
 		return nil, errors.New("tx not found")
 	}
-	// rawTx, err := hex.DecodeString(string(resp))
-	// if err != nil {
-	// 	return nil, err
-	// }
 	return resp, nil
+}
+
+func (txi *transactionIndex) storeTx(txid string, raw []byte) {
+	txi.mtx.Lock()
+	defer txi.mtx.Unlock()
+	txi.txids[txid] = raw
+}
+
+func (txi *transactionIndex) getTx(txid string) []byte {
+	txi.mtx.RLock()
+	defer txi.mtx.RUnlock()
+	return txi.txids[txid]
 }

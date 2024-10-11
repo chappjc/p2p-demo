@@ -21,8 +21,10 @@ var (
 
 type peerMan struct {
 	h host.Host
-	// nodeType string // The type of this node, e.g., "leader", "validator", "sentry"
+	// nodeType string // e.g., "leader", "validator", "sentry"
 }
+
+var _ discovery.Discoverer = (*peerMan)(nil) // FindPeers method
 
 func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 	defer s.Close()
@@ -34,9 +36,6 @@ func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 			continue
 		}
 
-		// addrs := pm.h.Peerstore().Addrs()
-		// pm.h.Peerstore().Peers()
-		// pm.h.Network().Peers()
 		peers := getKnownPeers(pm.h)
 		// filteredPeers := filterPeersForNodeType(peers, nodeType)
 
@@ -48,8 +47,6 @@ func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 
 	fmt.Println("done sending peers on stream", s.ID())
 }
-
-var _ discovery.Discoverer = (*peerMan)(nil) // FindPeers method
 
 // func (pm *peerMan) Advertise(ctx context.Context, ns string, opts ...discovery.Option) (time.Duration, error) {
 // 	return 0, nil

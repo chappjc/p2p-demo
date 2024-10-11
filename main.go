@@ -125,7 +125,7 @@ func run(ctx context.Context) error {
 	host.SetStreamHandler(ProtocolIDTransaction, txi.txStreamHandler)
 	// host.SetStreamHandler(ProtocolIDBlock, txi.blockStreamHandler)
 
-	if err = startTxGossip(ctx, host); err != nil {
+	if err = startTxGossip(ctx, host, txi); err != nil {
 		return err
 	}
 
@@ -135,13 +135,14 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		fmt.Println("connected to ", peerInfo)
 
-		rawTx, err := getTx(ctx, testTxid, peerInfo.ID, host)
-		if err != nil {
-			fmt.Println("getTx:", err)
-		} else {
-			fmt.Printf("rawTx: %x\n", rawTx)
-		}
+		// rawTx, err := getTx(ctx, testTxid, peerInfo.ID, host)
+		// if err != nil {
+		// 	fmt.Println("getTx:", err)
+		// } else {
+		// 	fmt.Printf("rawTx: %x\n", rawTx)
+		// }
 	} // else would use persistent peer store (address book)
 
 	// peer discovery protocol stream handler
