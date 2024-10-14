@@ -10,18 +10,9 @@ import (
 	mrand "math/rand"
 	"os"
 	"os/signal"
-	"slices"
-	"sync"
 	"syscall"
-	"time"
 
-	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
-	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
-	"github.com/multiformats/go-multiaddr"
 )
 
 const (
@@ -52,13 +43,13 @@ func main() {
 }
 
 var (
-	rawKey, _ = hex.DecodeString("307702010104200c69e64c05ecec17a4c640294d231a191b4eeb4f55fa0fb9e4d293ac010b0c10a00a06082a8648ce3d030107a14403420004aa9f1dc0e9fec8a1651f7d16b4d1ea36b6e3cdabfa742924fb3dadcc2fd9acfebd9cf8cf87159447470d81f15f84ba391c08c088d1a00ef9dc5acadc77c5ee76")
-
+	key       string
 	port      uint64
 	connectTo string
 )
 
 func run(ctx context.Context) error {
+	flag.StringVar(&key, "key", "", "private key bytes (hexadecimal), empty is pseudo-random")
 	flag.Uint64Var(&port, "port", 0, "listen port (0 for random)")
 	flag.StringVar(&connectTo, "connect", "", "peer multiaddr to connect to")
 	flag.Parse()
@@ -68,166 +59,35 @@ func run(ctx context.Context) error {
 		rr = mrand.New(mrand.NewSource(int64(port)))
 	}
 
-	privKey, _, _ := crypto.GenerateECDSAKeyPair(rr)
-	ecdsaPrivKey := privKey.(*crypto.ECDSAPrivateKey)
-	rawKey, _ := crypto.MarshalECDSAPrivateKey(*ecdsaPrivKey)
-	fmt.Printf("priv key: %x\n", rawKey)
-	pubKey := privKey.GetPublic()
-	rawPub, _ := pubKey.Raw()
-	fmt.Printf("pub key:  %x\n", rawPub)
-
-	// ecdsaPrivKey, err := crypto.UnmarshalECDSAPrivateKey(rawKey)
-	// if err != nil {
-	// 	return err
-	// }
-	// var privKey crypto.PrivKey = ecdsaPrivKey
-
-	sourceMultiAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port))
-
-	// listenAddrs := libp2p.ListenAddrStrings(
-	// 	"/ip4/0.0.0.0/tcp/0",
-	// 	// "/ip4/0.0.0.0/tcp/0/ws",
-	// )
-	// security := libp2p.Security(libp2ptls.ID, libp2ptls.New)
-
-	host, err := libp2p.New(
-		libp2p.Transport(tcp.NewTCPTransport),
-		// security,
-		libp2p.ListenAddrs(sourceMultiAddr),
-		// listenAddrs,
-		libp2p.Identity(privKey),
-	) // libp2p.RandomIdentity, in-mem peer store, ...
-	if err != nil {
-		return err
-	}
-
-	fmt.Println("Host created, ID:", host.ID())
-	var portStr string
-	for _, addr := range host.Addrs() {
-		ps, _ := addr.ValueForProtocol(multiaddr.P_TCP)
-		if ps != "" {
-			portStr = ps
-		}
-		fmt.Println("Listening on", addr)
-	}
-	log.Printf("to connect: /ip4/127.0.0.1/tcp/%v/p2p/%s\n", portStr, host.ID())
-
-	/*for _, la := range host.Network().ListenAddresses() {
-		if p, err := la.ValueForProtocol(multiaddr.P_TCP); err == nil {
-			fmt.Println("port:", p)
-			break
-		}
-	}*/
-
-	// transaction data request stream and handler
-	txi := newTransactionIndex()
-	txi.txids[testTxid] = []byte{1, 2, 3}
-	host.SetStreamHandler(ProtocolIDTransaction, txi.txStreamHandler)
-	// host.SetStreamHandler(ProtocolIDBlock, txi.blockStreamHandler)
-
-	if err = startTxGossip(ctx, host, txi); err != nil {
-		return err
-	}
-
-	// connect to bootstrap peer, if any
-	if connectTo != "" {
-		peerInfo, err := connectPeer(ctx, connectTo, host)
+	var rawKey []byte
+	if key == "" {
+		privKey := newKey(rr)
+		rawKey, _ = privKey.Raw()
+		log.Printf("priv key: %x\n", rawKey)
+	} else {
+		var err error
+		rawKey, err = hex.DecodeString(key)
 		if err != nil {
 			return err
 		}
-		fmt.Println("connected to ", peerInfo)
-	} // else would use persistent peer store (address book)
+	}
 
-	// peer discovery protocol stream handler
-	pm := &peerMan{h: host}
-	host.SetStreamHandler(ProtocolIDDiscover, pm.discoveryStreamHandler)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			// discover for this node
-			peerChan, err := pm.FindPeers(ctx, "kwil_namespace")
-			if err != nil {
-				fmt.Println("FindPeers:", err)
-			} else {
-				// Listen for discovered peers
-				go func() {
-					for peer := range peerChan {
-						addPeerToPeerStore(host, peer)
-					}
-				}()
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(20 * time.Second):
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	fmt.Println("shutting down...")
-
-	return host.Close()
-}
-
-func checkProtocolSupport(_ context.Context, h host.Host, peerID peer.ID, protoID protocol.ID) (bool, error) {
-	// Check if the peer supports the specified protocol
-	supportedProtos, err := h.Peerstore().GetProtocols(peerID)
+	node, err := NewNode(port, rawKey)
 	if err != nil {
-		return false, err
-	}
-	fmt.Printf("protos supported by %v: %v\n", peerID, supportedProtos)
-
-	// supportsProto, err := h.Peerstore().SupportsProtocols(peerID, pid)
-	// if err != nil {
-	// 	fmt.Println("Failed to check protocols for peer:", peerID, err)
-	// 	continue
-	// }
-
-	// If the peer supports the protocol, print out the peer ID
-	return slices.Contains(supportedProtos, protoID) /* len(supportsProto) > 0 */, nil
-}
-
-// checkProtocolSupportAll checks if the current connected peers support a given protocol.
-func checkProtocolSupportAll(ctx context.Context, h host.Host, pid protocol.ID) {
-	for _, peerID := range h.Network().Peers() {
-		supportsProto, err := checkProtocolSupport(ctx, h, peerID, pid)
-		if err != nil {
-			fmt.Println("Failed to check protocols for peer:", peerID, err)
-			continue
-		}
-
-		if supportsProto {
-			fmt.Printf("Peer %s supports protocol %s\n", peerID, pid)
-		} else {
-			fmt.Printf("Peer %s does NOT support protocol %s\n", peerID, pid)
-		}
-	}
-}
-
-func connectPeer(ctx context.Context, addr string, host host.Host) (*peer.AddrInfo, error) {
-	// Turn the destination into a multiaddr.
-	maddr, err := multiaddr.NewMultiaddr(addr)
-	if err != nil {
-		log.Println(err)
-		return nil, err
+		return err
 	}
 
-	// Extract the peer ID from the multiaddr.
-	info, err := peer.AddrInfoFromP2pAddr(maddr)
-	if err != nil {
-		log.Println(err)
-		return nil, err
+	addr := node.Addr()
+	log.Printf("to connect: %s\n", addr)
+
+	var bootPeers []string
+	if connectTo != "" {
+		bootPeers = append(bootPeers, connectTo)
 	}
+	if err = node.Start(ctx, bootPeers...); err != nil {
+		return err
+	}
+	// Start is blocking, for now.
 
-	// Add the destination's peer multiaddress in the peerstore.
-	// This will be used during connection and stream creation by libp2p.
-	// host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
-
-	return info, host.Connect(ctx, *info)
+	return nil
 }
