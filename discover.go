@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -162,13 +163,13 @@ func sendPeersToStream(s network.Stream, peers []PeerInfo) error {
 }
 
 // addPeerToPeerStore adds a discovered peer to the local peer store.
-func addPeerToPeerStore(h host.Host, p peer.AddrInfo) {
+func addPeerToPeerStore(ps peerstore.Peerstore, p peer.AddrInfo) {
 	// Only add the peer if it's not already in the peer store.
 	// h.Peerstore().Peers()
-	addrs := h.Peerstore().Addrs(p.ID)
+	addrs := ps.Addrs(p.ID)
 	for _, addr := range p.Addrs {
 		if !multiaddr.Contains(addrs, addr) {
-			h.Peerstore().AddAddr(p.ID, addr, time.Hour)
+			ps.AddAddr(p.ID, addr, time.Hour)
 			fmt.Println("Added new peer address to store:", p.ID, addr)
 		}
 	}

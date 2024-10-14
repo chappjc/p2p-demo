@@ -4,24 +4,33 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
-	"github.com/libp2p/go-libp2p/core/host"
 )
 
 const (
-	TopicTxs = "txs"
+	TopicTxs  = "txs"
+	TopicBlks = "blks"
 )
 
-func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) error {
-	_, topicTx, subTx, err := subTxs(ctx, host)
+func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
+	topicTx, subTx, err := subTxs(ctx, ps)
 	if err != nil {
 		return err
 	}
 
+	subCanceled := make(chan struct{})
+
+	n.wg.Add(1)
 	go func() {
+		defer func() {
+			<-subCanceled
+			topicTx.Close()
+			n.wg.Done()
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -30,7 +39,7 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 			}
 
 			txid := randBytes(32)
-			txi.storeTx(hex.EncodeToString(txid), randBytes(10))
+			n.txi.storeTx(hex.EncodeToString(txid), randBytes(10))
 			fmt.Printf("announcing txid %x\n", txid)
 			err := topicTx.Publish(ctx, txid)
 			if err != nil {
@@ -40,13 +49,17 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 		}
 	}()
 
-	me := host.ID()
+	me := n.host.ID()
 
 	go func() {
+		defer close(subCanceled)
+		defer subTx.Cancel()
 		for {
 			txMsg, err := subTx.Next(ctx)
 			if err != nil {
-				fmt.Println("subTx.Next:", err)
+				if !errors.Is(err, context.Canceled) {
+					fmt.Println("subTx.Next:", err)
+				}
 				return
 			}
 
@@ -57,7 +70,7 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 
 			txid := hex.EncodeToString(txMsg.Data)
 
-			have := txi.have(txid)
+			have := n.txi.have(txid)
 			fmt.Printf("received tx msg from %v (rcvd from %s), data = %x, already have = %v\n",
 				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data, have)
 			if have {
@@ -66,12 +79,12 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 
 			// Now we use getTx with the ProtocolIDTransaction stream
 			fmt.Println("fetching tx", txid)
-			txRaw, err := getTx(ctx, txid, txMsg.GetFrom(), host)
+			txRaw, err := getTx(ctx, txid, txMsg.GetFrom(), n.host)
 			if err != nil {
 				fmt.Println("getTx:", err)
 				continue
 			}
-			txi.storeTx(txid, txRaw)
+			n.txi.storeTx(txid, txRaw)
 
 			// txMsg.ID
 			// txMsg.ReceivedFrom
@@ -83,24 +96,27 @@ func startTxGossip(ctx context.Context, host host.Host, txi *transactionIndex) e
 	return nil
 }
 
-func subTxs(ctx context.Context, host host.Host) (*pubsub.PubSub, *pubsub.Topic, *pubsub.Subscription, error) {
-	ps, err := pubsub.NewGossipSub(ctx, host)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+func subTxs(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
+	return subTopic(ctx, ps, TopicTxs)
+}
 
+func subBlks(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
+	return subTopic(ctx, ps, TopicBlks)
+}
+
+func subTopic(_ context.Context, ps *pubsub.PubSub, topic string) (*pubsub.Topic, *pubsub.Subscription, error) {
 	// Join the discovery topic
-	topic, err := ps.Join(TopicTxs)
+	th, err := ps.Join(topic)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	// Subscribe to the discovery topic
-	sub, err := topic.Subscribe()
+	sub, err := th.Subscribe()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	return ps, topic, sub, nil
+	return th, sub, nil
 }
 
 func randBytes(n int) []byte {

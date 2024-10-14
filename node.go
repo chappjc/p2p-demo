@@ -78,8 +78,15 @@ func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 	return nil
 }
 
+// Start begins tx and block gossip, connects to any bootstrap peers, and begins
+// peer discovery.
 func (n *Node) Start(ctx context.Context, peers ...string) error {
-	if err := startTxGossip(ctx, n.host, n.txi); err != nil {
+	ps, err := pubsub.NewGossipSub(ctx, n.host)
+	if err != nil {
+		return err
+	}
+
+	if err := n.startTxGossip(ctx, ps); err != nil {
 		return err
 	}
 
@@ -113,10 +120,9 @@ func (n *Node) Start(ctx context.Context, peers ...string) error {
 			if err != nil {
 				fmt.Println("FindPeers:", err)
 			} else {
-				// Listen for discovered peers
 				go func() {
 					for peer := range peerChan {
-						addPeerToPeerStore(n.host, peer)
+						addPeerToPeerStore(n.host.Peerstore(), peer)
 					}
 				}()
 			}
@@ -128,6 +134,8 @@ func (n *Node) Start(ctx context.Context, peers ...string) error {
 			}
 		}
 	}()
+
+	log.Println("node tx/block gossip started, and peer discovery enabled")
 
 	n.wg.Wait()
 
