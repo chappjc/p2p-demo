@@ -15,7 +15,7 @@ import (
 
 const (
 	ProtocolIDDiscover protocol.ID = "/kwil/discovery/1.0.0"
-	ProtocolIDGetTx    protocol.ID = "/kwil/tx/1.0.0"
+	ProtocolIDTx       protocol.ID = "/kwil/tx/1.0.0"
 	ProtocolIDTxAnn    protocol.ID = "/kwil/txann/1.0.0"
 	ProtocolIDBlock    protocol.ID = "/kwil/blk/1.0.0"
 	ProtocolIDBlkAnn   protocol.ID = "/kwil/blkann/1.0.0"
@@ -30,8 +30,9 @@ const (
 	// testTxid = "1c577d897bb6cef3cffb8a6e323289eec5c85024dacd188d485fbf3bb003bb76"
 )
 
-func requestFrom(ctx context.Context, host host.Host, peer peer.ID, resID string, readLimit int64) ([]byte, error) {
-	txStream, err := host.NewStream(ctx, peer, ProtocolIDGetTx)
+func requestFrom(ctx context.Context, host host.Host, peer peer.ID, resID string,
+	proto protocol.ID, readLimit int64) ([]byte, error) {
+	txStream, err := host.NewStream(ctx, peer, proto)
 	if err != nil {
 		return nil, err
 	}

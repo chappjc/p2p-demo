@@ -43,20 +43,29 @@ func readTxResp(rd io.Reader) ([]byte, error) {
 }
 
 func getTx(ctx context.Context, txid string, peer peer.ID, host host.Host) ([]byte, error) {
-	txStream, err := host.NewStream(ctx, peer, ProtocolIDGetTx)
+	resID := getTxMsgPrefix + txid
+	rawTx, err := requestFrom(ctx, host, peer, resID, ProtocolIDTx, txReadLimit)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, ErrNotFound) {
+			return nil, errors.Join(err, ErrTxNotFound)
+		}
+		return nil, fmt.Errorf("tx get request failed: %v", err)
 	}
-	defer txStream.Close()
+	return rawTx, nil
+	// txStream, err := host.NewStream(ctx, peer, ProtocolIDTx)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// defer txStream.Close()
 
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(txGetTimeout)
-	}
+	// deadline, ok := ctx.Deadline()
+	// if !ok {
+	// 	deadline = time.Now().Add(txGetTimeout)
+	// }
 
-	txStream.SetDeadline(deadline)
+	// txStream.SetDeadline(deadline)
 
-	return requestTx(txStream, []byte(getTxMsgPrefix+txid))
+	// return requestTx(txStream, []byte(getTxMsgPrefix+txid))
 }
 
 func requestTx(rw io.ReadWriter, reqMsg []byte) ([]byte, error) {
@@ -140,7 +149,7 @@ func (txi *transactionIndex) txGetStreamHandler(s network.Stream) {
 		return
 	}
 	txid := string(req)
-	log.Printf("requested txid: %q", txid)
+	// log.Printf("requested txid: %q", txid)
 	rawTx := txi.getTx(txid)
 	if rawTx == nil {
 		s.Write([]byte("0"))
@@ -194,13 +203,16 @@ func (txi *transactionIndex) getTx(txid string) []byte {
 	return txi.txids[txid]
 }
 
-func (txi *transactionIndex) reapN(n int) map[string][]byte {
+func (txi *transactionIndex) reapN(n int) ([]string, [][]byte) {
 	txi.mtx.Lock()
 	defer txi.mtx.Unlock()
-	out := make(map[string][]byte, min(n, len(txi.txids)))
+	n = min(n, len(txi.txids))
+	txids := make([]string, 0, n)
+	txns := make([][]byte, 0, n)
 	for txid, rawTx := range txi.txids {
-		out[txid] = rawTx
 		delete(txi.txids, txid)
+		txids = append(txids, txid)
+		txns = append(txns, rawTx)
 	}
-	return out
+	return txids, txns
 }

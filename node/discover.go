@@ -28,6 +28,8 @@ type peerMan struct {
 
 var _ discovery.Discoverer = (*peerMan)(nil) // FindPeers method
 
+var _ network.StreamHandler = new(peerMan).discoveryStreamHandler
+
 func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 	defer s.Close()
 

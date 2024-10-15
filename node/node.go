@@ -1,12 +1,9 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -37,7 +34,7 @@ const (
 type Node struct {
 	pm  *peerMan
 	txi *transactionIndex
-	bki *blockIndex
+	bki *blockStore
 
 	host   host.Host
 	pex    bool
@@ -53,7 +50,7 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	// n.host.Network().InterfaceListenAddresses() // expands 0.0.0.0
 
 	txi := newTransactionIndex()
-	host.SetStreamHandler(ProtocolIDGetTx, txi.txGetStreamHandler)
+	host.SetStreamHandler(ProtocolIDTx, txi.txGetStreamHandler)
 
 	pm := &peerMan{h: host}
 	if pex {
@@ -69,11 +66,14 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 		pm:   pm,
 		pex:  pex,
 		txi:  txi,
+		bki:  newBlockStore(),
 	}
 
 	node.leader.Store(leader)
 
 	host.SetStreamHandler(ProtocolIDTxAnn, node.txAnnStreamHandler)
+	host.SetStreamHandler(ProtocolIDBlkAnn, node.blkAnnStreamHandler)
+	host.SetStreamHandler(ProtocolIDBlock, node.blkGetStreamHandler)
 
 	return node, nil
 }
@@ -94,8 +94,10 @@ func (n *Node) ID() string {
 func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 	for _, pid := range []protocol.ID{
 		ProtocolIDDiscover,
-		ProtocolIDGetTx,
+		ProtocolIDTx,
 		ProtocolIDTxAnn,
+		ProtocolIDBlock,
+		ProtocolIDBlkAnn,
 		// pubsub.GossipSubID_v12,
 	} {
 		ok, err := checkProtocolSupport(ctx, n.host, peer, pid)
@@ -113,10 +115,10 @@ func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 // index (would be mempool), assembling a block, and advertising it to peers.
 // Only the leader does this.
 func (n *Node) mine(ctx context.Context) {
-	N := 100
+	var height int64
+	N := 30
 	for {
 		if n.txi.size() < N || !n.leader.Load() {
-			fmt.Println(n.txi.size(), n.leader.Load())
 			select {
 			case <-ctx.Done():
 				return
@@ -128,40 +130,20 @@ func (n *Node) mine(ctx context.Context) {
 		log.Println("MINED BLOCK -- serializing and announcing!")
 
 		// Reap txns for the block
-		blkTxs := n.txi.reapN(N)
+		txids, txns := n.txi.reapN(N)
 
-		hasher := sha256.New()
-
-		numTxBts := binary.LittleEndian.AppendUint64(nil, uint64(len(blkTxs)))
-		hasher.Write(numTxBts)
-
-		var buf bytes.Buffer // TODO: more efficient
-		_, err := buf.Write(numTxBts)
+		blkID, rawBlk, err := encodeBlock(height, txids, txns)
 		if err != nil {
-			log.Println("failed to write block header")
+			log.Printf("encodeBlock: %v", err)
 			return
 		}
 
-		for txid, rawTx := range blkTxs {
-			txhash, err := hex.DecodeString(txid)
-			if err != nil {
-				log.Println("invalid tx hash for block:", txid)
-				return
-			}
-			buf.Write(txhash)
-			hasher.Write(txhash)
+		n.bki.store(blkID, height, rawBlk)
 
-			buf.Write(binary.LittleEndian.AppendUint64(nil, uint64(len(rawTx))))
-			buf.Write(rawTx)
-		}
+		log.Printf("ANNOUNCING BLOCK %v / %d size %d\n", blkID, height, len(rawBlk))
 
-		blkHash := hasher.Sum(nil)
-		blkID := hex.EncodeToString(blkHash)
-		rawBlk := buf.Bytes()
-
-		log.Printf("ANNOUNCING BLOCK %v size %d\n", blkID, len(rawBlk))
-
-		go n.announceBlk(ctx, blkID, rawBlk, n.host.ID())
+		go n.announceBlk(ctx, blkID, height, rawBlk, n.host.ID())
+		height++
 	}
 }
 

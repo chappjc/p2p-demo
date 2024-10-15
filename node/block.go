@@ -3,7 +3,11 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"strconv"
@@ -15,41 +19,44 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-type blockIndex struct {
+type blockStore struct {
 	mtx      sync.RWMutex
-	blkids   map[string]int64
+	idx      map[string]int64
 	fetching map[string]bool
+	memStore map[string][]byte // TODO: disk
 }
 
-func newBlockIndex() *blockIndex {
-	return &blockIndex{
-		blkids:   make(map[string]int64),
+func newBlockStore() *blockStore {
+	return &blockStore{
+		idx:      make(map[string]int64),
 		fetching: make(map[string]bool),
+		memStore: make(map[string][]byte),
 	}
 }
 
-func (bki *blockIndex) have(blkid string) bool { // this is racy
+func (bki *blockStore) have(blkid string) bool { // this is racy
 	bki.mtx.RLock()
 	defer bki.mtx.RUnlock()
-	_, have := bki.blkids[blkid]
+	_, have := bki.idx[blkid]
 	return have
 }
 
-func (bki *blockIndex) store(blkid string, height int64) {
+func (bki *blockStore) store(blkid string, height int64, raw []byte) {
 	bki.mtx.Lock()
 	defer bki.mtx.Unlock()
 	if height == -1 {
-		delete(bki.blkids, blkid)
+		delete(bki.idx, blkid)
 		delete(bki.fetching, blkid)
 		return
 	}
-	bki.blkids[blkid] = height
+	bki.idx[blkid] = height
+	bki.memStore[blkid] = raw
 }
 
-func (bki *blockIndex) preFetch(blkid string) bool {
+func (bki *blockStore) preFetch(blkid string) bool {
 	bki.mtx.Lock()
 	defer bki.mtx.Unlock()
-	if _, have := bki.blkids[blkid]; have {
+	if _, have := bki.idx[blkid]; have {
 		return false // don't need it
 	}
 
@@ -61,26 +68,57 @@ func (bki *blockIndex) preFetch(blkid string) bool {
 	return true // go get it
 }
 
-func (bki *blockIndex) size() int {
+func (bki *blockStore) size() int {
 	bki.mtx.RLock()
 	defer bki.mtx.RUnlock()
-	return len(bki.blkids)
+	return len(bki.idx)
 }
 
-func (bki *blockIndex) getBlk(blkid string) int64 {
+func (bki *blockStore) getBlk(blkid string) (int64, []byte) {
 	bki.mtx.RLock()
 	defer bki.mtx.RUnlock()
-	h, have := bki.blkids[blkid]
+	h, have := bki.idx[blkid]
 	if !have {
-		return -1
+		return -1, nil
 	}
-	return h
+	raw, have := bki.memStore[blkid]
+	if !have {
+		return -1, nil
+	}
+	return h, raw
 }
 
 const (
 	blkReadLimit  = 300_000_000
 	blkGetTimeout = 90 * time.Second
 )
+
+func (n *Node) blkGetStreamHandler(s network.Stream) {
+	defer s.Close()
+
+	req := make([]byte, 128)
+	// io.ReadFull(s, req)
+	nr, err := s.Read(req)
+	if err != nil && err != io.EOF {
+		fmt.Println("bad get blk req", err)
+		return
+	}
+	req, ok := bytes.CutPrefix(req[:nr], []byte(getBlkMsgPrefix))
+	if !ok {
+		fmt.Println("bad get tx request")
+		return
+	}
+	blkid := strings.TrimSpace(string(req))
+	log.Printf("requested blkid: %q", blkid)
+
+	height, rawBlk := n.bki.getBlk(blkid)
+	if height == -1 {
+		s.Write([]byte("0")) // don't have it
+	} else {
+		binary.Write(s, binary.LittleEndian, height)
+		s.Write(rawBlk)
+	}
+}
 
 func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	defer s.Close()
@@ -109,13 +147,22 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 		log.Println("invalid blk ann request")
 		return
 	}
+	blkHash, err := hex.DecodeString(blkid)
+	if err != nil {
+		log.Printf("invalid block id: %v", err)
+		return
+	}
+	if len(blkHash) != 32 {
+		log.Printf("invalid block id: len %d", len(blkHash))
+		return
+	}
 	height, err := strconv.ParseInt(heightStr, 10, 64)
 	if err != nil {
 		log.Printf("invalid height in blk ann request: %v", err)
 		return
 	}
 	if height < 0 {
-		log.Println("invalid height in blk ann request: %d", height)
+		log.Printf("invalid height in blk ann request: %d", height)
 		return
 	}
 	log.Printf("blk announcement received: %q / %d", blkid, height)
@@ -123,6 +170,12 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	if !n.bki.preFetch(blkid) {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
 	}
+	var success bool
+	defer func() {
+		if !success { // did not get the rawTx
+			n.bki.store(blkid, -1, nil) // no longer fetching
+		}
+	}()
 
 	log.Printf("retrieving new block: %q", blkid)
 
@@ -132,24 +185,59 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 		log.Printf("announcer failed to provide %v, trying other peers", blkid)
 		// Since we are aware, ask other peers. we could also put this in a goroutine
 		s.Close() // close the announcers stream first
-		rawBlk, err = n.getBlkWithRetry(ctx, blkid, 500*time.Millisecond, 10)
+		var gotHeight int64
+		gotHeight, rawBlk, err = n.getBlkWithRetry(ctx, blkid, 500*time.Millisecond, 10)
 		if err != nil {
-			n.bki.store(blkid, height) // no longer fetching
 			log.Printf("unable to retrieve tx %v: %v", blkid, err)
+			return
+		}
+		if gotHeight != height {
+			log.Printf("getblk response had unexpected height: wanted %d, got %d", height, gotHeight)
 			return
 		}
 	}
 
 	log.Println("obtained content for block", blkid)
 
-	n.bki.store(blkid, int64(height))
+	ver, encHeight, txids, _, err := decodeBlock(rawBlk)
+	if err != nil {
+		log.Printf("decodeBlock failed for %v: %v", blkid, err)
+		return
+	}
+	if encHeight != height {
+		log.Printf("getblk response had unexpected height: wanted %d, got %d", height, encHeight)
+		return
+	}
+	txHashes := make([][]byte, len(txids))
+	for i := range txids {
+		txHashes[i], err = hex.DecodeString(txids[i])
+		if err != nil {
+			log.Printf("decodeBlock failed for %v: %v", blkid, err)
+			return
+		}
+	}
+	gotBlkHash := hashBlockHeader(ver, height, txHashes)
+	if !bytes.Equal(gotBlkHash, blkHash) {
+		log.Printf("invalid block hash: wanted %x, got %x", blkHash, gotBlkHash)
+		return
+	}
+
+	success = true
+
+	log.Printf("confirming %d transactions in block %d (%v)", len(txids), height, blkid)
+	for _, txid := range txids {
+		n.txi.storeTx(txid, nil) // rm from mempool
+		// TODO: confirm i.e. move from mempool to confirmed tx index
+	}
+
+	n.bki.store(blkid, height, rawBlk)
 
 	// re-announce
 
-	go n.announceBlk(context.Background(), blkid, rawBlk, s.Conn().RemotePeer())
+	go n.announceBlk(context.Background(), blkid, height, rawBlk, s.Conn().RemotePeer())
 }
 
-func (n *Node) announceBlk(ctx context.Context, blkid string, rawBlk []byte, from peer.ID) {
+func (n *Node) announceBlk(ctx context.Context, blkid string, height int64, rawBlk []byte, from peer.ID) {
 	peers := n.peers()
 	if len(peers) == 0 {
 		log.Println("no peers to advertise block to")
@@ -160,8 +248,8 @@ func (n *Node) announceBlk(ctx context.Context, blkid string, rawBlk []byte, fro
 		if peerID == from {
 			continue
 		}
-		log.Printf("advertising block %v (height %d) to peer %v", blkid, len(rawBlk), peerID)
-		resID := annBlkMsgPrefix + blkid
+		log.Printf("advertising block %s (height %d) to peer %v", blkid, len(rawBlk), peerID)
+		resID := annBlkMsgPrefix + blkid + ":" + strconv.Itoa(int(height))
 		err := advertiseToPeer(ctx, n.host, peerID, ProtocolIDBlkAnn, resID, rawBlk)
 		if err != nil {
 			log.Println(err)
@@ -171,12 +259,12 @@ func (n *Node) announceBlk(ctx context.Context, blkid string, rawBlk []byte, fro
 }
 
 func (n *Node) getBlkWithRetry(ctx context.Context, blkid string, baseDelay time.Duration,
-	maxAttempts int) ([]byte, error) {
+	maxAttempts int) (int64, []byte, error) {
 	var attempts int
 	for {
-		raw, err := n.getBlk(ctx, blkid)
+		height, raw, err := n.getBlk(ctx, blkid)
 		if err == nil {
-			return raw, nil
+			return height, raw, nil
 		}
 
 		log.Printf("unable to retrieve block %v (%v), waiting to retry", blkid, err)
@@ -188,16 +276,17 @@ func (n *Node) getBlkWithRetry(ctx context.Context, blkid string, baseDelay time
 		baseDelay *= 2
 		attempts++
 		if attempts >= maxAttempts {
-			return nil, ErrBlkNotFound
+			return 0, nil, ErrBlkNotFound
 		}
 	}
 }
 
-func (n *Node) getBlk(ctx context.Context, blkid string) ([]byte, error) {
+func (n *Node) getBlk(ctx context.Context, blkid string) (int64, []byte, error) {
 	for _, peer := range n.peers() {
 		log.Printf("requesting block %v from %v", blkid, peer)
+		t0 := time.Now()
 		resID := getBlkMsgPrefix + blkid
-		raw, err := requestFrom(ctx, n.host, peer, resID, blkReadLimit)
+		resp, err := requestFrom(ctx, n.host, peer, resID, ProtocolIDBlock, blkReadLimit)
 		if errors.Is(err, ErrNotFound) {
 			log.Printf("block not available on %v", peer)
 			continue
@@ -210,7 +299,119 @@ func (n *Node) getBlk(ctx context.Context, blkid string) ([]byte, error) {
 			log.Printf("unexpected error from %v: %v", peer, err)
 			continue
 		}
-		return raw, nil
+
+		if len(resp) < 8 {
+			log.Printf("block response too short")
+			continue
+		}
+
+		log.Printf("obtained content for block %q in %v", blkid, time.Since(t0))
+
+		height := binary.LittleEndian.Uint64(resp[:8])
+		rawBlk := resp[8:]
+
+		return int64(height), rawBlk, nil
 	}
-	return nil, ErrBlkNotFound
+	return 0, nil, ErrBlkNotFound
+}
+
+// type TxHash [32]byte
+
+func encodeBlock(height int64, txids []string, txns [][]byte) (string, []byte, error) {
+	hasher := sha256.New()
+	var buf bytes.Buffer // TODO: more efficient
+
+	verBts := binary.LittleEndian.AppendUint16(nil, uint16(0))
+	hasher.Write(verBts)
+	buf.Write(verBts)
+
+	heightBts := binary.LittleEndian.AppendUint64(nil, uint64(height))
+	hasher.Write(heightBts)
+	buf.Write(heightBts)
+
+	numTxBts := binary.LittleEndian.AppendUint64(nil, uint64(len(txns)))
+	hasher.Write(numTxBts)
+	buf.Write(numTxBts)
+
+	for i, txid := range txids {
+		txhash, err := hex.DecodeString(txid)
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid tx hash for block: %w", err)
+		}
+		buf.Write(txhash)
+		hasher.Write(txhash)
+
+		tx := txns[i] // TODO: range check
+		buf.Write(binary.LittleEndian.AppendUint64(nil, uint64(len(tx))))
+		buf.Write(tx)
+		// tx bytes are not in block hash
+	}
+
+	blkHash := hasher.Sum(nil)
+	rawBlk := buf.Bytes()
+	return hex.EncodeToString(blkHash), rawBlk, nil
+}
+
+func decodeBlock(rawBlk []byte) (version uint16, height int64, txids []string, txns [][]byte, err error) {
+	if len(rawBlk) < 18 { // 2 (version) + 8 (height) + 8 (num txs)
+		return 0, 0, nil, nil, fmt.Errorf("block data too short")
+	}
+
+	r := bytes.NewReader(rawBlk)
+
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("failed to read version: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &height); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("failed to read height: %w", err)
+	}
+
+	var numTx uint64
+	if err := binary.Read(r, binary.LittleEndian, &numTx); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("failed to read number of transactions: %w", err)
+	}
+
+	txids = make([]string, numTx)
+	txns = make([][]byte, numTx)
+
+	for i := range numTx {
+		txhash := make([]byte, 32)
+		if _, err := io.ReadFull(r, txhash); err != nil {
+			return 0, 0, nil, nil, fmt.Errorf("failed to read tx hash: %w", err)
+		}
+		txids[i] = hex.EncodeToString(txhash)
+
+		var txLen uint64
+		if err := binary.Read(r, binary.LittleEndian, &txLen); err != nil {
+			return 0, 0, nil, nil, fmt.Errorf("failed to read tx length: %w", err)
+		}
+
+		tx := make([]byte, txLen)
+		if _, err := io.ReadFull(r, tx); err != nil {
+			return 0, 0, nil, nil, fmt.Errorf("failed to read tx data: %w", err)
+		}
+		txns[i] = tx
+	}
+
+	return version, height, txids, txns, nil
+}
+
+func hashBlockHeader(ver uint16, height int64, txHashes [][]byte) []byte {
+	hasher := sha256.New()
+
+	verBts := binary.LittleEndian.AppendUint16(nil, ver)
+	hasher.Write(verBts)
+
+	heightBts := binary.LittleEndian.AppendUint64(nil, uint64(height))
+	hasher.Write(heightBts)
+
+	numTxBts := binary.LittleEndian.AppendUint64(nil, uint64(len(txHashes)))
+	hasher.Write(numTxBts)
+
+	for _, txid := range txHashes {
+		hasher.Write(txid)
+	}
+
+	return hasher.Sum(nil)
 }
