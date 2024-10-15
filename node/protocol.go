@@ -25,9 +25,7 @@ const (
 	annBlkMsgPrefix = "blkann:"
 	getBlkMsgPrefix = "getblk:"
 
-	getMsg = "get" // context dependent
-
-	// testTxid = "1c577d897bb6cef3cffb8a6e323289eec5c85024dacd188d485fbf3bb003bb76"
+	getMsg = "get" // context dependent, in open stream convo
 )
 
 func requestFrom(ctx context.Context, host host.Host, peer peer.ID, resID string,
@@ -61,6 +59,8 @@ func request(rw io.ReadWriter, reqMsg []byte, readLimit int64) ([]byte, error) {
 	return rawTx, nil
 }
 
+var noData = []byte("0")
+
 func readResp(rd io.Reader, limit int64) ([]byte, error) {
 	rd = io.LimitReader(rd, limit)
 	resp, err := io.ReadAll(rd)
@@ -70,7 +70,7 @@ func readResp(rd io.Reader, limit int64) ([]byte, error) {
 	if len(resp) == 0 {
 		return nil, ErrNoResponse
 	}
-	if bytes.Equal(resp, []byte("0")) {
+	if bytes.Equal(resp, noData) {
 		return nil, ErrNotFound
 	}
 	return resp, nil

@@ -36,7 +36,7 @@ func readTxResp(rd io.Reader) ([]byte, error) {
 	if len(resp) == 0 {
 		return nil, ErrNoResponse
 	}
-	if bytes.Equal(resp, []byte("0")) {
+	if bytes.Equal(resp, noData) {
 		return nil, ErrTxNotFound
 	}
 	return resp, nil
@@ -152,7 +152,7 @@ func (txi *transactionIndex) txGetStreamHandler(s network.Stream) {
 	// log.Printf("requested txid: %q", txid)
 	rawTx := txi.getTx(txid)
 	if rawTx == nil {
-		s.Write([]byte("0"))
+		s.Write(noData) // don't have it
 	} else {
 		s.Write(rawTx)
 	}

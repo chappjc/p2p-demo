@@ -113,7 +113,7 @@ func (n *Node) blkGetStreamHandler(s network.Stream) {
 
 	height, rawBlk := n.bki.getBlk(blkid)
 	if height == -1 {
-		s.Write([]byte("0")) // don't have it
+		s.Write(noData) // don't have it
 	} else {
 		binary.Write(s, binary.LittleEndian, height)
 		s.Write(rawBlk)
@@ -178,6 +178,7 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	}()
 
 	log.Printf("retrieving new block: %q", blkid)
+	t0 := time.Now()
 
 	// First try to get from this stream.
 	rawBlk, err := request(s, []byte(getMsg), blkReadLimit)
@@ -197,7 +198,7 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 		}
 	}
 
-	log.Println("obtained content for block", blkid)
+	log.Printf("obtained content for block %q in %v", blkid, time.Since(t0))
 
 	ver, encHeight, txids, _, err := decodeBlock(rawBlk)
 	if err != nil {
@@ -248,7 +249,7 @@ func (n *Node) announceBlk(ctx context.Context, blkid string, height int64, rawB
 		if peerID == from {
 			continue
 		}
-		log.Printf("advertising block %s (height %d) to peer %v", blkid, len(rawBlk), peerID)
+		log.Printf("advertising block %s (height %d / txs %d) to peer %v", blkid, height, len(rawBlk), peerID)
 		resID := annBlkMsgPrefix + blkid + ":" + strconv.Itoa(int(height))
 		err := advertiseToPeer(ctx, n.host, peerID, ProtocolIDBlkAnn, resID, rawBlk)
 		if err != nil {

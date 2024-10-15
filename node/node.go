@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	dummyTxSize     = 40_000
+	blockTxCount    = 50
+	dummyTxSize     = 123_000
 	dummyTxInterval = 1 * time.Second
 )
 
@@ -116,7 +117,7 @@ func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 // Only the leader does this.
 func (n *Node) mine(ctx context.Context) {
 	var height int64
-	N := 30
+	const N = blockTxCount
 	for {
 		if n.txi.size() < N || !n.leader.Load() {
 			select {
@@ -138,9 +139,11 @@ func (n *Node) mine(ctx context.Context) {
 			return
 		}
 
+		log.Printf("confirmed %d transactions in block %d (%v)", len(txids), height, blkID)
+
 		n.bki.store(blkID, height, rawBlk)
 
-		log.Printf("ANNOUNCING BLOCK %v / %d size %d\n", blkID, height, len(rawBlk))
+		log.Printf("ANNOUNCING BLOCK %v / %d size = %d, txs = %d\n", blkID, height, len(rawBlk), len(txids))
 
 		go n.announceBlk(ctx, blkID, height, rawBlk, n.host.ID())
 		height++

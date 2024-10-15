@@ -30,7 +30,7 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 		return
 	}
 	txid := string(req)
-	log.Printf("tx announcement received: %q", txid)
+	// log.Printf("tx announcement received: %q", txid)
 
 	if !n.txi.preFetch(txid) {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
@@ -74,7 +74,7 @@ func (n *Node) announceTx(ctx context.Context, txid string, rawTx []byte, from p
 		if peerID == from {
 			continue
 		}
-		log.Printf("advertising tx %v (len %d) to peer %v", txid, len(rawTx), peerID)
+		// log.Printf("advertising tx %v (len %d) to peer %v", txid, len(rawTx), peerID)
 		err := n.advertiseTxToPeer(ctx, peerID, txid, rawTx)
 		if err != nil {
 			log.Println(err)
@@ -100,7 +100,7 @@ func (n *Node) advertiseTxToPeer(ctx context.Context, peerID peer.ID, txid strin
 		return fmt.Errorf("txann failed: %w", err)
 	}
 
-	log.Printf("advertised content %s to peer %s", txid, peerID)
+	// log.Printf("advertised tx content %s to peer %s", txid, peerID)
 
 	// Keep the stream open for potential content requests
 	go func() {
@@ -145,7 +145,7 @@ func (n *Node) startTxAnns(ctx context.Context, period time.Duration, sz int) {
 			rawTx := randBytes(sz)
 			n.txi.storeTx(txid, rawTx)
 
-			log.Printf("announcing txid %v", txid)
+			// log.Printf("announcing txid %v", txid)
 			n.announceTx(ctx, txid, rawTx, n.host.ID())
 		}
 	}()
