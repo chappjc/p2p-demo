@@ -3,27 +3,17 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
-	mrand "math/rand"
+	mrand2 "math/rand/v2"
 	"os"
 	"os/signal"
+	"p2p/node"
 	"syscall"
-
-	"github.com/libp2p/go-libp2p/core/protocol"
-)
-
-const (
-	ProtocolIDDiscover    protocol.ID = "/kwil/discovery/1.0.0"
-	ProtocolIDTransaction protocol.ID = "/kwil/transaction/1.0.0"
-	ProtocolIDBlock       protocol.ID = "/kwil/block/1.0.0"
-
-	getTxMsgPrefix  = "gettx:"
-	getBlkMsgPrefix = "getblk:"
-
-	testTxid = "1c577d897bb6cef3cffb8a6e323289eec5c85024dacd188d485fbf3bb003bb76"
 )
 
 func main() {
@@ -47,24 +37,37 @@ var (
 	key       string
 	port      uint64
 	connectTo string
+	noPex     bool
+	leader    bool
 )
 
 func run(ctx context.Context) error {
 	flag.StringVar(&key, "key", "", "private key bytes (hexadecimal), empty is pseudo-random")
 	flag.Uint64Var(&port, "port", 0, "listen port (0 for random)")
 	flag.StringVar(&connectTo, "connect", "", "peer multiaddr to connect to")
+	flag.BoolVar(&noPex, "no-pd", false, "disable peer discover")
+	flag.BoolVar(&leader, "leader", false, "make this node produce blocks (should only be one in a network)")
 	flag.Parse()
 
 	rr := rand.Reader
 	if port != 0 { // deterministic key based on port for testing
-		rr = mrand.New(mrand.NewSource(int64(port)))
+		// rr = mrand.New(mrand.NewSource(int64(port)))
+		var seed [32]byte
+		binary.LittleEndian.PutUint64(seed[:], port)
+		seed = sha256.Sum256(seed[:])
+		log.Printf("seed: %x", seed)
+		rr = mrand2.NewChaCha8(seed)
+		// var buf bytes.Buffer
+		// buf.Write(seed[:])
+		// buf.Write(seed[:])
+		// rr = &buf
 	}
 
 	var rawKey []byte
 	if key == "" {
-		privKey := newKey(rr)
+		privKey := node.NewKey(rr)
 		rawKey, _ = privKey.Raw()
-		log.Printf("priv key: %x\n", rawKey)
+		log.Printf("priv key: %x", rawKey)
 	} else {
 		var err error
 		rawKey, err = hex.DecodeString(key)
@@ -73,7 +76,7 @@ func run(ctx context.Context) error {
 		}
 	}
 
-	node, err := NewNode(port, rawKey)
+	node, err := node.NewNode(port, rawKey, leader, !noPex)
 	if err != nil {
 		return err
 	}

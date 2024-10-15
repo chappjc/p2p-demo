@@ -1,4 +1,4 @@
-package main
+package node
 
 import (
 	"context"
@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/network"
 )
 
 const (
@@ -58,32 +60,38 @@ func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 			txMsg, err := subTx.Next(ctx)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
-					fmt.Println("subTx.Next:", err)
+					log.Println("subTx.Next:", err)
 				}
 				return
 			}
 
 			if string(txMsg.From) == string(me) {
-				fmt.Println("message from me ignored")
+				// log.Println("message from me ignored")
 				continue
 			}
 
 			txid := hex.EncodeToString(txMsg.Data)
+			fromPeerID := txMsg.GetFrom()
 
 			have := n.txi.have(txid)
-			fmt.Printf("received tx msg from %v (rcvd from %s), data = %x, already have = %v\n",
+			log.Printf("received tx msg from %v (rcvd from %s), data = %x, already have = %v\n",
 				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data, have)
 			if have {
 				continue
 			}
 
 			// Now we use getTx with the ProtocolIDTransaction stream
-			fmt.Println("fetching tx", txid)
-			txRaw, err := getTx(ctx, txid, txMsg.GetFrom(), n.host)
+			log.Println("fetching tx", txid)
+			if n.host.Network().Connectedness(fromPeerID) != network.Connected {
+				log.Println("DELAY for fetch, gossip from non-peer")
+				time.Sleep(200 * time.Millisecond)
+			}
+			txRaw, err := n.getTxWithRetry(ctx, txid, 500*time.Millisecond, 10)
 			if err != nil {
-				fmt.Println("getTx:", err)
+				log.Printf("unable to retrieve tx %v: %v", txid, err)
 				continue
 			}
+
 			n.txi.storeTx(txid, txRaw)
 
 			// txMsg.ID
