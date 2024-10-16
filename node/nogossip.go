@@ -34,6 +34,7 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 
 	if !n.txi.preFetch(txid) {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
+		// TODO: if we already had it, still re-announce?
 	} // now we must n.txi.storeTx(txid, ...)
 	// TODO: distinguish mempool vs block store txns
 

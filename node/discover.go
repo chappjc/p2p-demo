@@ -34,7 +34,7 @@ func (pm *peerMan) discoveryStreamHandler(s network.Stream) {
 	defer s.Close()
 
 	sc := bufio.NewScanner(s)
-	for sc.Scan() {
+	for sc.Scan() { // why am I doing this again? Probably just Read once...
 		msg := sc.Text()
 		if msg != discoverPeersMsg {
 			continue
