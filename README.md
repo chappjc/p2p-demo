@@ -143,23 +143,27 @@ To facilitate robust consensus in restart/reconnect scenarios, leader and valida
 - nodes should retrieve unknown transactions that were announced to it
 - nodes should re-announce the transactions that it has retrieved and which pass basic validity checks
 - nodes should periodically re-announce unconfirmed transactions
+- non-leader nodes should perform peer exchange to mesh for efficient content distribution, validators prioritizing other validators
 - leader must broadcast new block IDs, and serve on request
 - all nodes must be able to request specific blocks, by height or hash (maybe other identifiers)
 - nodes may operate in "blocks only" mode, such as when syncing or when functioning as an archival node with no mempool
+- leader should only accept connections from (peer with) validators, so as to prevent spamming on the leader
 
 Other considerations arise from semantics of mempool and block confirmation. For instances, remove transactions from mempool when they are mined, and re-check unconfirmed transactions after confirming a blocks, etc.  However, this section pertains to expected p2p behavior to facilitate function of Kwil in the leader-based block production design.
 
-### Stream Protocol Specs [WIP]
+### Stream Protocol Specs
 
-The above requirements necessitate a number of stream protocols. They will be enumerated and outlined here...
+The above requirements necessitate a number of stream protocols, which are detailed here.
 
-The protocol stream handlers and initiator methods will interact with several other higher level systems including: mempool, block store, block index, transaction index, consensus engine, etc. Systems such as RPC, instrumentation, etc. must not be involved.
+The protocol stream handlers and initiator methods will interact with several other higher level systems including: mempool, block store, block index, transaction index, consensus engine, etc.
 
-Non-blocking: All stream handlers and initiators MUST NOT be blocking, and MUST be able to run concurrently. Other systems that interact with the P2P layer SHOULD utilize atomics, queues, goroutines, and other internal mechanisms for handling communications *asynchronously*.
+Non-blocking: All stream handlers and initiators MUST NOT block other node functions, and MUST be able to run concurrently. Other systems that interact with the P2P layer SHOULD utilize atomics, queues, goroutines, and other internal mechanisms for handling communications *asynchronously*.
+
+Out-of-sequence or otherwise invalid/unexpected messages received on incoming (remotely initiated) streams or from any higher level gossip protocols should be either ignored or initiate resolution of consensus state. For instance, if a validator may reset to the "waiting for proposal" consensus state or use a resolution protocol to rejoin the current round. These scenarios may arise if a validator looses connectivity or a temporary network partition interrupts leader messages, or if the validator simply starts up mid-round.
 
 The following stream protocols are needed, where there is a stream initiator (does `NewStream`, outgoing to peer) and a stream handler (had `SetStreamHandler` pointing to a handler function, for incoming from a peer).
 
-Data retrieval protocols:
+#### Data retrieval protocols
 
 - `ProtocolIDBlock` - Block get
   - summary: request block content by hash or height, perhaps separate protocols
@@ -171,22 +175,23 @@ Data retrieval protocols:
   - summary: request tx content by txid
   - initiator: any peer type
   - handler: any peer type
-  - context note: this is an unlikely protocol to use, but here for completeness
+  - context note: most txns will be retrieved on the announce protocol (see below), but this can be used to request the content from a different peer
 
-Content announcement protocols:
+#### Content announcement protocols
 
 - `ProtocolIDTxAnn` - Tx announce
   - summary: announce txid available, serve content if requested
   - initiator: any peer type, but leader would only announce their own (not re-announce others)
   - handler: any peer type (all must do this for txns to reach leader)
+  - note: this protocol involves re-announce from non-leader peers, effectively making this a custom gossip protocol, to ensure leader is not burdened with re-announce
 
 - `ProtocolIDBlockAnn` - (committed) block announce
   - summary: announce a committed/finalized block, which must have leader signature
-  - context note: for a sentry, this is just a new block to get and execute; for a validator, this is the final "commit" step in the consensus sequence
   - initiator: any peer type, but originates from leader
   - handler: any peer type except leader, where sentry is likely to request the block content, and validator would already have executed it from the preceding proposal (see below)
+  - context notes: for a sentry, this is just a new block to get and execute; for a validator, this is the final "commit" step in the consensus sequence. This protocol also involves re-announce to propagate the block. We may also use gossipsub so the message signature from the initiator (leader) is retained, but the announce would no longer imply direct content availability from the peer who relayed it, necessitating more complex content discovery (dht, asking peers, retry logic, etc.).
 
-Leader-validator protocols:
+#### Leader-validator protocols
 
 - `ProtocolIDBlockPropose` - proposed block advertisement
   - summary: announce a new block proposal, leader signed, which validators should fetch (on the same stream) and execute (async, after closing the stream)
@@ -199,9 +204,14 @@ Leader-validator protocols:
   - handler: leader
   - may also be gossip protocol instead of p2p stream since the message is small with only a hash and a signature
 
-NOTE: If block execution were always very fast (<1  sec) or if reconnects are found to be transparent and not disruptive to the stream, the two above protocols could be one long-lived stream. I'm assuming not for now.
+NOTE: If block execution were always very fast (<1 sec), the two above could be a single protocol using one longer-lived stream. Reconnects, however brief, break the stream.
 
 maybe:
 
-- `ProtocolIDProposedBlock` - if validator wants to request a block proposal outside of the advert stream (`ProtocolIDBlockPropose`), such as if they lost the connection before pulling the entire proposed block contents in that stream. Probably just miss the round or wait for re-announce from leader instead of this.
+- `ProtocolIDProposedBlock` - if validator wants to request a block proposal outside of the advert stream (`ProtocolIDBlockPropose`), such as if they lost the connection before pulling the entire proposed block contents in that stream. Probably just miss the round or wait for re-announce from leader instead of this. But this does seem very simply to implement like the other content retrieval protocols described above.
 - `ProtocolIDACKCommit` - response from validator to leader after commit, needed? There may not need to be any response. Also, since doing the Commit is fast if they already executed the proposal, any response would just be in the same stream (`ProtocolIDBlockAnn`) unlike the proposal ACK/NACK that could take time for a validator to produce.
+
+leader-validator process:
+
+1. leader proposes block: direct stream to validator-peers OR announce in gossip protocol w/ content request to leader or validator-peer.  Probably work like txn gossip, but only to peers that are validators.  Leader could choose subset/max peers and let the others get it indirectly, but that could be unfair.
+2. validators retrieve the proposed block, either from leader or validator peer
