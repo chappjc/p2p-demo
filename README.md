@@ -227,10 +227,12 @@ There are multiple concurrent processes and statuses within `PROPOSED` (announci
 ### Validator's perspective
 
 1. `PROPOSED` -- received new valid block proposal to execute from leader
-2. `EXECUTED` -- block execution complete, prepared-transaction ready, appHash computed
+2. `EXECUTED` -- block execution complete, prepared-transaction ready, appHash computed and sent to leader in ACK (or NACK)
 3. `COMMITTED` -- committed the prepared tx on receipt of commit message from leader
 
 Note that if the leader rollsback/aborts instead of requesting commit, we are back in the `COMMITTED` state for the *previous block* until we receive a new block proposal.
+
+Optimization note: if the validator is slow, and a committed block announcement is received for the block that they are currently still executing (prior to sending their ACK), they may queue the commit even though their ACK will go ignored. This is an optimization because the alternative is to discard the (apparently early) commit message, and end up sending a pointless ACK that would be ignored or at best get a response containing an "ok to commit"/FF response. Worst case scenario would be the validator receives no response or a negative response to the ACK, and is forced to request the best block from peers as if it were in sync/catch-up. They will automatically be back in "consensus mode" when they receive the next block proposal that appears to be next from the perspective of that node's committed block index. Leader re-announcement will facilitate in the event of widespread network slowdown or other interruptions.
 
 ### Sentry's perspective
 
