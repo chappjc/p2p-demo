@@ -218,9 +218,9 @@ There are fundamentally just two stages:
 
 1. `PROPOSED` -- new block proposed by leader, collecting validator ACKs/NACKs, concurrently executing the block.
 
-   Once a threshold of validator ACK appHashes match the locally computed appHash (and prepared transaction is ready to commit), commit the changes, and *then* send commit msg to validators.
+   Once a threshold of validator ACK appHashes match the locally computed appHash (and prepared transaction is ready to commit), commit the changes.
 
-2. `COMMITTED` -- committed block announced, now idle or assembling the next block
+2. `COMMITTED` -- announce the committed block to validators, now idle or assembling the next block
 
 There are multiple concurrent processes and statuses within `PROPOSED` (announcing the proposal, locally executing, and receiving validator results), but in terms of block production, this can be thought of as being "in a consensus round". Outside of this stage appears idle to the rest of the network.
 
