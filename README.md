@@ -74,9 +74,9 @@ ProtocolIDTxAnn    protocol.ID = "/kwil/txann/1.0.0"
 annTxMsgPrefix  = "txann:"
 ```
 
-Stream handler function `txAnnStreamHandler` handles the solicitation.
-
 The function `advertiseTxToPeer` creates the new stream to advertise the transaction.
+
+Stream handler function `txAnnStreamHandler` handles the solicitation.
 
 1. The announcer peer creates a stream to its peers.
 
@@ -126,15 +126,14 @@ To facilitate initial block download (IBD) to sync a node (outside of consensus 
 
 - request blocks, sequentially or in batch
 - handle block requests from all nodes, prioritizing validators (or recovering leader)
-- sanity check retrieved block prior to executing it (height, prev block hash, other header elements)
+- sanity check retrieved block prior to executing it (height, prev block hash, leader signature, other header elements)
 
 To facilitate robust consensus in restart/reconnect scenarios, leader and validator:
 
 - validators SHOULD re-send/broadcast ACK/NACK (containing their computed app hash for the block), conditionally if that block is latest
-- validators SHOULD be able to solicit the leader's consensus status for a block (waiting for ACKs, or block already committed/aborted)
+- validators SHOULD be able to solicit the leader's consensus status for a block (waiting for ACKs, or block already committed/aborted) -- maybe not?
 - leader SHOULD re-send COMMIT/ROLLBACK/ABRT periodically if insufficient responses received by a deadline
-- validators SHOULD be able to send *unsolicited* "commit done" messages (normally a response in of the COMMIT/ROLLBACK/ABRT protocol)
-- leader SHOULD respond to any out-of-sequence messages as appropriate for the validator to resolve
+- leader SHOULD respond to any out-of-sequence messages as appropriate for the validator to resolve e.g. ACK for a previous or unknown block proposal can be met with a RSLV message with current block and consensus stage
 - (?) leader MAY propose a new block when insufficient responses (given timeout)
 
 ### Kwil P2P Requirements
@@ -211,7 +210,38 @@ maybe:
 - `ProtocolIDProposedBlock` - if validator wants to request a block proposal outside of the advert stream (`ProtocolIDBlockPropose`), such as if they lost the connection before pulling the entire proposed block contents in that stream. Probably just miss the round or wait for re-announce from leader instead of this. But this does seem very simply to implement like the other content retrieval protocols described above.
 - `ProtocolIDACKCommit` - response from validator to leader after commit, needed? There may not need to be any response. Also, since doing the Commit is fast if they already executed the proposal, any response would just be in the same stream (`ProtocolIDBlockAnn`) unlike the proposal ACK/NACK that could take time for a validator to produce.
 
-leader-validator process:
+## Appendix A: Block Production Stages
 
-1. leader proposes block: direct stream to validator-peers OR announce in gossip protocol w/ content request to leader or validator-peer.  Probably work like txn gossip, but only to peers that are validators.  Leader could choose subset/max peers and let the others get it indirectly, but that could be unfair.
-2. validators retrieve the proposed block, either from leader or validator peer
+### Leader's perspective
+
+There are fundamentally just two stages:
+
+1. `PROPOSED` -- new block proposed by leader, collecting validator ACKs/NACKs, concurrently executing the block.
+
+   Once a threshold of validator ACK appHashes match the locally computed appHash (and prepared transaction is ready to commit), commit the changes, and *then* send commit msg to validators.
+
+2. `COMMITTED` -- committed block announced, now idle or assembling the next block
+
+There are multiple concurrent processes and statuses within `PROPOSED` (announcing the proposal, locally executing, and receiving validator results), but in terms of block production, this can be thought of as being "in a consensus round". Outside of this stage appears idle to the rest of the network.
+
+### Validator's perspective
+
+1. `PROPOSED` -- received new valid block proposal to execute from leader
+2. `EXECUTED` -- block execution complete, prepared-transaction ready, appHash computed
+3. `COMMITTED` -- committed the prepared tx on receipt of commit message from leader
+
+Note that if the leader rollsback/aborts instead of requesting commit, we are back in the `COMMITTED` state for the *previous block* until we receive a new block proposal.
+
+### Sentry's perspective
+
+There is no awareness of the block production process, only committed block announcements. As long as the blocks have the leader's signature (or the message itself authenticates the leader as the source), the block is accepted and executed. Similarly during sync, but from blocks requested from peers rather in the announcement protocol.
+
+### Recovery, Re-announcement, and Idempotence
+
+A main reason why more fine grained stages are not necessary necessary is that messages can be re-sent without issue i.e. consensus messages should be idempotent. For instance, validators may re-announce their ACK/NACK, and leaders may re-announce their COMMIT.
+
+In addition, robust handling of out-of-sequence messages simplifies recovery. For instance, if the leader proposes a new block, which validators begin executing, and the leader crashes before "precommitting" (creating the prepared transaction), and the leader starts up with no knowledge of the block they proposed, they are now back at the previous height where they now prepare and propose a new block. Validators have committed nothing and are able to rollback their prepared transactions for the abandoned proposal. Similarly, if the leader had precommitted, it may be rolled back on startup for the same outcome. If the crash was after leader commit, but before making the committed block announcement, leader startup can begin with a committed block announcement for the latest block. In the event of a clean restart, this would be an ignorable re-announcement of a known block to some or all of the validators.
+
+Each protocol should be defined with this in mind. e.g. if leader receives an ACK for a block proposal that it does not recognize (either it is not in a consensus round or it has proposed a different block), a simple ABRT response can signal to the validator to rollback.
+
+In any case where a validator cannot participate in the current round, they would simply wait for either the next committed block announcement (the round completed without them) or the next proposal (a new round was started). Requesting required blocks to catch up should be done until the validator is able to participate in consensus, a state that is trivially detected when a committed block announcement is for a block that is beyond the next in the validator's committed block index.
