@@ -156,3 +156,52 @@ The above requirements necessitate a number of stream protocols. They will be en
 The protocol stream handlers and initiator methods will interact with several other higher level systems including: mempool, block store, block index, transaction index, consensus engine, etc. Systems such as RPC, instrumentation, etc. must not be involved.
 
 Non-blocking: All stream handlers and initiators MUST NOT be blocking, and MUST be able to run concurrently. Other systems that interact with the P2P layer SHOULD utilize atomics, queues, goroutines, and other internal mechanisms for handling communications *asynchronously*.
+
+The following stream protocols are needed, where there is a stream initiator (does `NewStream`, outgoing to peer) and a stream handler (had `SetStreamHandler` pointing to a handler function, for incoming from a peer).
+
+Data retrieval protocols:
+
+- `ProtocolIDBlock` - Block get
+  - summary: request block content by hash or height, perhaps separate protocols
+  - initiator: any peer type
+  - handler: any peer type
+  - context note: this protocol is important to sync, and requesting block content from peers other than the advertising peer (see below)
+
+- `ProtocolIDTx` - Tx get
+  - summary: request tx content by txid
+  - initiator: any peer type
+  - handler: any peer type
+  - context note: this is an unlikely protocol to use, but here for completeness
+
+Content announcement protocols:
+
+- `ProtocolIDTxAnn` - Tx announce
+  - summary: announce txid available, serve content if requested
+  - initiator: any peer type, but leader would only announce their own (not re-announce others)
+  - handler: any peer type (all must do this for txns to reach leader)
+
+- `ProtocolIDBlockAnn` - (committed) block announce
+  - summary: announce a committed/finalized block, which must have leader signature
+  - context note: for a sentry, this is just a new block to get and execute; for a validator, this is the final "commit" step in the consensus sequence
+  - initiator: any peer type, but originates from leader
+  - handler: any peer type except leader, where sentry is likely to request the block content, and validator would already have executed it from the preceding proposal (see below)
+
+Leader-validator protocols:
+
+- `ProtocolIDBlockPropose` - proposed block advertisement
+  - summary: announce a new block proposal, leader signed, which validators should fetch (on the same stream) and execute (async, after closing the stream)
+  - initiator: leader or validator (if relaying to other validators), but content originates from leader. or could require direct leader->validator stream
+  - handlers: validators only, sentry must ignore and validators should not send to sentry
+
+- `ProtocolIDACKProposal` - post-exec validator result
+  - summary: validators result of executing a proposed block, ACK(+appHash)/NACK, is provided to the leader
+  - initiator: validator
+  - handler: leader
+  - may also be gossip protocol instead of p2p stream since the message is small with only a hash and a signature
+
+NOTE: If block execution were always very fast (<1  sec) or if reconnects are found to be transparent and not disruptive to the stream, the two above protocols could be one long-lived stream. I'm assuming not for now.
+
+maybe:
+
+- `ProtocolIDProposedBlock` - if validator wants to request a block proposal outside of the advert stream (`ProtocolIDBlockPropose`), such as if they lost the connection before pulling the entire proposed block contents in that stream. Probably just miss the round or wait for re-announce from leader instead of this.
+- `ProtocolIDACKCommit` - response from validator to leader after commit, needed? There may not need to be any response. Also, since doing the Commit is fast if they already executed the proposal, any response would just be in the same stream (`ProtocolIDBlockAnn`) unlike the proposal ACK/NACK that could take time for a validator to produce.
