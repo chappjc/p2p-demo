@@ -162,12 +162,12 @@ func (n *Node) txGetStreamHandler(s network.Stream) {
 	req := make([]byte, 128)
 	nr, err := s.Read(req)
 	if err != nil && err != io.EOF {
-		fmt.Println("bad get tx req", err)
+		fmt.Println("bad get tx req:", err)
 		return
 	}
 	req, ok := bytes.CutPrefix(req[:nr], []byte(getTxMsgPrefix))
 	if !ok {
-		fmt.Println("bad get tx request")
+		fmt.Println("txGetStreamHandler: bad get tx request", string(req))
 		return
 	}
 	txid := string(req)
@@ -207,7 +207,7 @@ func (n *Node) Start(ctx context.Context, peers ...string) error {
 	// custom stream-based gossip uses txAnnStreamHandler and announceTx.
 	// This dummy method will make create+announce new pretend transactions.
 	// It also periodically rebroadcasts txns.
-	n.startTxAnns(ctx, dummyTxInterval, time.Minute, dummyTxSize) // nogossip.go
+	n.startTxAnns(ctx, dummyTxInterval, 30*time.Second, dummyTxSize) // nogossip.go
 
 	// mine is our block anns goroutine, which must be only for leader
 	n.wg.Add(1)

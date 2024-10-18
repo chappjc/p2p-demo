@@ -105,7 +105,7 @@ func (n *Node) blkGetStreamHandler(s network.Stream) {
 	}
 	req, ok := bytes.CutPrefix(req[:nr], []byte(getBlkMsgPrefix))
 	if !ok {
-		fmt.Println("bad get tx request")
+		fmt.Println("bad get blk request")
 		return
 	}
 	blkid := strings.TrimSpace(string(req))

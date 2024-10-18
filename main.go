@@ -12,8 +12,9 @@ import (
 	mrand2 "math/rand/v2"
 	"os"
 	"os/signal"
-	"p2p/node"
 	"syscall"
+
+	"p2p/node"
 )
 
 func main() {

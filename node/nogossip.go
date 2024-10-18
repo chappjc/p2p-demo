@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,12 +22,12 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 	req := make([]byte, 128)
 	nr, err := s.Read(req)
 	if err != nil && err != io.EOF {
-		log.Println("bad get tx req", err)
+		log.Println("bad get tx req:", err)
 		return
 	}
 	req, ok := bytes.CutPrefix(req[:nr], []byte(annTxMsgPrefix))
 	if !ok {
-		log.Println("bad get tx request")
+		log.Println("txAnnStreamHandler: bad get tx request", string(req))
 		return
 	}
 	txid := string(req)
@@ -106,7 +107,7 @@ func (n *Node) advertiseTxToPeer(ctx context.Context, peerID peer.ID, txid strin
 		return fmt.Errorf("failed to open stream to peer: %w", err)
 	}
 
-	roundTripDeadline := time.Now().Add(3 * time.Second)
+	roundTripDeadline := time.Now().Add(txGetTimeout) // lower for this part?
 	s.SetWriteDeadline(roundTripDeadline)
 
 	// Send a lightweight advertisement with the object ID
@@ -121,17 +122,21 @@ func (n *Node) advertiseTxToPeer(ctx context.Context, peerID peer.ID, txid strin
 	go func() {
 		defer s.Close()
 
-		s.SetReadDeadline(roundTripDeadline)
+		s.SetReadDeadline(time.Now().Add(txGetTimeout))
 
 		req := make([]byte, 128)
-		n, err := s.Read(req)
-		if err != nil && err != io.EOF {
-			log.Println("bad get tx req", err)
+		nr, err := s.Read(req)
+		if err != nil && !errors.Is(err, io.EOF) {
+			log.Println("bad get tx req:", err)
 			return
 		}
-		req, ok := bytes.CutPrefix(req[:n], []byte(getMsg))
+		if nr == 0 /*&& errors.Is(err, io.EOF)*/ {
+			return // they hung up, probably didn't want it
+		}
+		req = req[:nr]
+		req, ok := bytes.CutPrefix(req, []byte(getMsg))
 		if !ok {
-			log.Println("bad get tx request")
+			log.Printf("advertise wait: bad get tx request %q", string(req))
 			return
 		}
 
@@ -176,23 +181,29 @@ func (n *Node) startTxAnns(ctx context.Context, newPeriod, reannouncePeriod time
 			case <-time.After(reannouncePeriod):
 			}
 
-			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-
-			n.mp.mtx.RLock()
-			defer n.mp.mtx.RUnlock()
-			log.Printf("re-announcing unconfirmed tnxs (%d)", len(n.mp.txns))
-			for txid, rawTx := range n.mp.txns {
-				n.announceTx(ctx, txid, rawTx, n.host.ID())
-				if ctx.Err() != nil {
-					// This is a sketch hack to avoid blocking mempool writes.
-					// We should instead grab random txns and release the lock,
-					// or otherwise be able to cancel this process if mempool
-					// writes are needed.
-					log.Println("interrupting slow re-broadcast")
-					break
+			func() {
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				n.mp.mtx.RLock()
+				defer n.mp.mtx.RUnlock()
+				log.Printf("re-announcing unconfirmed tnxs (%d)", len(n.mp.txns))
+				var count int
+				for txid, rawTx := range n.mp.txns {
+					n.announceTx(ctx, txid, rawTx, n.host.ID())
+					if ctx.Err() != nil {
+						// This is a sketch hack to avoid blocking mempool writes.
+						// We should instead grab random txns and release the lock,
+						// or otherwise be able to cancel this process if mempool
+						// writes are needed.
+						log.Println("interrupting long re-broadcast")
+						break
+					}
+					count++
+					if count >= 20 {
+						break
+					}
 				}
-			}
-			cancel()
+			}()
 		}
 	}()
 }
