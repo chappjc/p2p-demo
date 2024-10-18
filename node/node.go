@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	mrand2 "math/rand/v2"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -66,13 +67,22 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 		})
 	}
 
+	dir := host.ID().String()
+	dir, _ = filepath.Abs(dir)
+	fmt.Println(dir)
+
+	blkStr, err := newBlockStore(dir)
+	if err != nil {
+		return nil, err
+	}
+
 	node := &Node{
 		host: host,
 		pm:   pm,
 		pex:  pex,
 		txi:  txi,
 		mp:   mp,
-		bki:  newBlockStore(),
+		bki:  blkStr,
 	}
 
 	node.leader.Store(leader)

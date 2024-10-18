@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
+
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -23,15 +25,23 @@ type blockStore struct {
 	mtx      sync.RWMutex
 	idx      map[string]int64
 	fetching map[string]bool
+
 	memStore map[string][]byte // TODO: disk
+	db       *badger.DB        // <-disk
 }
 
-func newBlockStore() *blockStore {
+func newBlockStore(dir string) (*blockStore, error) {
+	opts := badger.DefaultOptions(dir)
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, err
+	}
 	return &blockStore{
 		idx:      make(map[string]int64),
 		fetching: make(map[string]bool),
 		memStore: make(map[string][]byte),
-	}
+		db:       db,
+	}, nil
 }
 
 func (bki *blockStore) have(blkid string) bool { // this is racy
@@ -50,7 +60,14 @@ func (bki *blockStore) store(blkid string, height int64, raw []byte) {
 		return
 	}
 	bki.idx[blkid] = height
+
 	bki.memStore[blkid] = raw
+	err := bki.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("blk:"+blkid), raw)
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (bki *blockStore) preFetch(blkid string) bool {
@@ -81,9 +98,21 @@ func (bki *blockStore) getBlk(blkid string) (int64, []byte) {
 	if !have {
 		return -1, nil
 	}
-	raw, have := bki.memStore[blkid]
-	if !have {
-		return -1, nil
+	// raw, have := bki.memStore[blkid]
+	// if !have {
+	// 	return -1, nil
+	// }
+	var raw []byte
+	err := bki.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("blk:" + blkid))
+		if err != nil {
+			return err
+		}
+		raw, err = item.ValueCopy(nil)
+		return err
+	})
+	if err != nil {
+		panic(err)
 	}
 	return h, raw
 }
