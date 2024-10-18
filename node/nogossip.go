@@ -182,24 +182,30 @@ func (n *Node) startTxAnns(ctx context.Context, newPeriod, reannouncePeriod time
 			}
 
 			func() {
-				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
 				n.mp.mtx.RLock()
-				defer n.mp.mtx.RUnlock()
-				log.Printf("re-announcing unconfirmed tnxs (%d)", len(n.mp.txns))
-				var count int
+				total := len(n.mp.txns)
+				toSend := min(20, total)
+				txids := make([]string, toSend)
+				txns := make([][]byte, toSend)
+				var i int
 				for txid, rawTx := range n.mp.txns {
-					n.announceTx(ctx, txid, rawTx, n.host.ID())
-					if ctx.Err() != nil {
-						// This is a sketch hack to avoid blocking mempool writes.
-						// We should instead grab random txns and release the lock,
-						// or otherwise be able to cancel this process if mempool
-						// writes are needed.
-						log.Println("interrupting long re-broadcast")
+					txids[i] = txid
+					txns[i] = rawTx
+					i++
+					if i >= toSend {
 						break
 					}
-					count++
-					if count >= 20 {
+				}
+				n.mp.mtx.RUnlock()
+
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+
+				log.Printf("re-announcing unconfirmed tnxs (%d / %d)", toSend, total)
+				for i, txid := range txids {
+					n.announceTx(ctx, txid, txns[i], n.host.ID()) // response handling is async
+					if ctx.Err() != nil {
+						log.Println("interrupting long re-broadcast")
 						break
 					}
 				}
