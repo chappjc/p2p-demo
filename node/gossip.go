@@ -1,5 +1,8 @@
 package node
 
+// WARNING: this is an OUT OF DATE gossipsub transaction gossip system.
+// Distinct mempool and confirmed tx index have since been added.
+
 import (
 	"context"
 	"crypto/rand"

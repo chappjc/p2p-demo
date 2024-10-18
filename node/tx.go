@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -52,20 +51,6 @@ func getTx(ctx context.Context, txid string, peer peer.ID, host host.Host) ([]by
 		return nil, fmt.Errorf("tx get request failed: %v", err)
 	}
 	return rawTx, nil
-	// txStream, err := host.NewStream(ctx, peer, ProtocolIDTx)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// defer txStream.Close()
-
-	// deadline, ok := ctx.Deadline()
-	// if !ok {
-	// 	deadline = time.Now().Add(txGetTimeout)
-	// }
-
-	// txStream.SetDeadline(deadline)
-
-	// return requestTx(txStream, []byte(getTxMsgPrefix+txid))
 }
 
 func requestTx(rw io.ReadWriter, reqMsg []byte) ([]byte, error) {
@@ -122,39 +107,13 @@ func (n *Node) getTxWithRetry(ctx context.Context, txid string, baseDelay time.D
 }
 
 type transactionIndex struct {
-	mtx      sync.RWMutex
-	txids    map[string][]byte
-	fetching map[string]bool
+	mtx   sync.RWMutex
+	txids map[string][]byte
 }
 
 func newTransactionIndex() *transactionIndex {
 	return &transactionIndex{
-		txids:    make(map[string][]byte),
-		fetching: make(map[string]bool),
-	}
-}
-
-func (txi *transactionIndex) txGetStreamHandler(s network.Stream) {
-	defer s.Close()
-
-	req := make([]byte, 128)
-	n, err := s.Read(req)
-	if err != nil && err != io.EOF {
-		fmt.Println("bad get tx req", err)
-		return
-	}
-	req, ok := bytes.CutPrefix(req[:n], []byte(getTxMsgPrefix))
-	if !ok {
-		fmt.Println("bad get tx request")
-		return
-	}
-	txid := string(req)
-	// log.Printf("requested txid: %q", txid)
-	rawTx := txi.getTx(txid)
-	if rawTx == nil {
-		s.Write(noData) // don't have it
-	} else {
-		s.Write(rawTx)
+		txids: make(map[string][]byte),
 	}
 }
 
@@ -170,49 +129,13 @@ func (txi *transactionIndex) storeTx(txid string, raw []byte) {
 	defer txi.mtx.Unlock()
 	if raw == nil {
 		delete(txi.txids, txid)
-		delete(txi.fetching, txid)
 		return
 	}
 	txi.txids[txid] = raw
-}
-
-func (txi *transactionIndex) preFetch(txid string) bool {
-	txi.mtx.Lock()
-	defer txi.mtx.Unlock()
-	if _, have := txi.txids[txid]; have {
-		return false // don't need it
-	}
-
-	if fetching := txi.fetching[txid]; fetching {
-		return false // already getting it
-	}
-	txi.fetching[txid] = true
-
-	return true // go get it
-}
-
-func (txi *transactionIndex) size() int {
-	txi.mtx.RLock()
-	defer txi.mtx.RUnlock()
-	return len(txi.txids)
 }
 
 func (txi *transactionIndex) getTx(txid string) []byte {
 	txi.mtx.RLock()
 	defer txi.mtx.RUnlock()
 	return txi.txids[txid]
-}
-
-func (txi *transactionIndex) reapN(n int) ([]string, [][]byte) {
-	txi.mtx.Lock()
-	defer txi.mtx.Unlock()
-	n = min(n, len(txi.txids))
-	txids := make([]string, 0, n)
-	txns := make([][]byte, 0, n)
-	for txid, rawTx := range txi.txids {
-		delete(txi.txids, txid)
-		txids = append(txids, txid)
-		txns = append(txns, rawTx)
-	}
-	return txids, txns
 }

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -36,6 +37,9 @@ type Node struct {
 	pm  *peerMan
 	txi *transactionIndex
 	bki *blockStore
+	mp  *mempool
+
+	// pf *prefetch
 
 	host   host.Host
 	pex    bool
@@ -51,7 +55,7 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	// n.host.Network().InterfaceListenAddresses() // expands 0.0.0.0
 
 	txi := newTransactionIndex()
-	host.SetStreamHandler(ProtocolIDTx, txi.txGetStreamHandler)
+	mp := newMempool()
 
 	pm := &peerMan{h: host}
 	if pex {
@@ -67,6 +71,7 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 		pm:   pm,
 		pex:  pex,
 		txi:  txi,
+		mp:   mp,
 		bki:  newBlockStore(),
 	}
 
@@ -75,6 +80,7 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	host.SetStreamHandler(ProtocolIDTxAnn, node.txAnnStreamHandler)
 	host.SetStreamHandler(ProtocolIDBlkAnn, node.blkAnnStreamHandler)
 	host.SetStreamHandler(ProtocolIDBlock, node.blkGetStreamHandler)
+	host.SetStreamHandler(ProtocolIDTx, node.txGetStreamHandler)
 
 	return node, nil
 }
@@ -119,7 +125,7 @@ func (n *Node) mine(ctx context.Context) {
 	var height int64
 	const N = blockTxCount
 	for {
-		if n.txi.size() < N || !n.leader.Load() {
+		if n.mp.size() < N || !n.leader.Load() {
 			select {
 			case <-ctx.Done():
 				return
@@ -130,8 +136,8 @@ func (n *Node) mine(ctx context.Context) {
 
 		log.Println("MINED BLOCK -- serializing and announcing!")
 
-		// Reap txns for the block
-		txids, txns := n.txi.reapN(N)
+		// Reap txns from mempool for the block
+		txids, txns := n.mp.reapN(N)
 
 		blkID, rawBlk, err := encodeBlock(height, txids, txns)
 		if err != nil {
@@ -150,6 +156,43 @@ func (n *Node) mine(ctx context.Context) {
 	}
 }
 
+func (n *Node) txGetStreamHandler(s network.Stream) {
+	defer s.Close()
+
+	req := make([]byte, 128)
+	nr, err := s.Read(req)
+	if err != nil && err != io.EOF {
+		fmt.Println("bad get tx req", err)
+		return
+	}
+	req, ok := bytes.CutPrefix(req[:nr], []byte(getTxMsgPrefix))
+	if !ok {
+		fmt.Println("bad get tx request")
+		return
+	}
+	txid := string(req)
+	// log.Printf("requested txid: %q", txid)
+
+	// first check mempool
+	rawTx := n.mp.getTx(txid)
+	if rawTx != nil {
+		s.Write(rawTx)
+		return
+	}
+
+	// this is racy, and should be different in product
+
+	// then confirmed tx index
+	rawTx = n.txi.getTx(txid)
+	if rawTx == nil {
+		s.Write(noData) // don't have it
+	} else {
+		s.Write(rawTx)
+	}
+
+	// NOTE: response could also include conf/unconf or block height (-1 or N)
+}
+
 // Start begins tx and block gossip, connects to any bootstrap peers, and begins
 // peer discovery.
 func (n *Node) Start(ctx context.Context, peers ...string) error {
@@ -163,8 +206,10 @@ func (n *Node) Start(ctx context.Context, peers ...string) error {
 
 	// custom stream-based gossip uses txAnnStreamHandler and announceTx.
 	// This dummy method will make create+announce new pretend transactions.
-	n.startTxAnns(ctx, dummyTxInterval, dummyTxSize) // nogossip.go
+	// It also periodically rebroadcasts txns.
+	n.startTxAnns(ctx, dummyTxInterval, time.Minute, dummyTxSize) // nogossip.go
 
+	// mine is our block anns goroutine, which must be only for leader
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
@@ -272,7 +317,7 @@ func newHost(port uint64, privKey []byte) (host.Host, error) {
 
 	return libp2p.New(
 		libp2p.Transport(tcp.NewTCPTransport),
-		libp2p.Security(noise.ID, noise.New),
+		libp2p.Security(noise.ID, noise.New), // modified TLS based on node-ID
 		libp2p.ListenAddrs(sourceMultiAddr),
 		// listenAddrs,
 		libp2p.Identity(privKeyP2P),

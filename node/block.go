@@ -200,7 +200,7 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 
 	log.Printf("obtained content for block %q in %v", blkid, time.Since(t0))
 
-	ver, encHeight, txids, _, err := decodeBlock(rawBlk)
+	ver, encHeight, txids, txns, err := decodeBlock(rawBlk)
 	if err != nil {
 		log.Printf("decodeBlock failed for %v: %v", blkid, err)
 		return
@@ -226,15 +226,14 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	success = true
 
 	log.Printf("confirming %d transactions in block %d (%v)", len(txids), height, blkid)
-	for _, txid := range txids {
-		n.txi.storeTx(txid, nil) // rm from mempool
-		// TODO: confirm i.e. move from mempool to confirmed tx index
+	for i, txid := range txids {
+		n.txi.storeTx(txid, txns[i]) // add to tx index
+		n.mp.storeTx(txid, nil)      // rm from mempool
 	}
 
 	n.bki.store(blkid, height, rawBlk)
 
 	// re-announce
-
 	go n.announceBlk(context.Background(), blkid, height, rawBlk, s.Conn().RemotePeer())
 }
 

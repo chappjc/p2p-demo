@@ -32,11 +32,22 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 	txid := string(req)
 	// log.Printf("tx announcement received: %q", txid)
 
-	if !n.txi.preFetch(txid) {
+	if !n.mp.preFetch(txid) { // it's in mempool
+		return
+	}
+
+	var fetched bool
+	defer func() {
+		if !fetched { // release prefetch
+			n.mp.storeTx(txid, nil)
+		}
+	}()
+
+	// not in mempool, check tx index
+	if n.txi.have(txid) {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
-		// TODO: if we already had it, still re-announce?
-	} // now we must n.txi.storeTx(txid, ...)
-	// TODO: distinguish mempool vs block store txns
+	}
+	// we don't have it. time to fetch
 
 	t0 := time.Now()
 	// log.Printf("retrieving new tx: %q", txid)
@@ -49,7 +60,6 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 		s.Close() // close the announcers stream first
 		rawTx, err = n.getTxWithRetry(context.TODO(), txid, 500*time.Millisecond, 10)
 		if err != nil {
-			n.txi.storeTx(txid, nil) // no longer fetching
 			log.Printf("unable to retrieve tx %v: %v", txid, err)
 			return
 		}
@@ -57,10 +67,14 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 
 	log.Printf("obtained content for tx %q in %v", txid, time.Since(t0))
 
-	n.txi.storeTx(txid, rawTx)
+	// here we could check tx index again in case a block was mined with it
+	// while we were fetching it
+
+	// store in mempool since it was not in tx index and thus not confirmed
+	n.mp.storeTx(txid, rawTx)
+	fetched = true
 
 	// re-announce
-
 	go n.announceTx(context.Background(), txid, rawTx, s.Conn().RemotePeer())
 }
 
@@ -130,7 +144,7 @@ func (n *Node) advertiseTxToPeer(ctx context.Context, peerID peer.ID, txid strin
 
 // startTxAnns creates pretend transactions, adds them to the tx index, and
 // announces them to peers.
-func (n *Node) startTxAnns(ctx context.Context, period time.Duration, sz int) {
+func (n *Node) startTxAnns(ctx context.Context, newPeriod, reannouncePeriod time.Duration, sz int) {
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
@@ -139,15 +153,46 @@ func (n *Node) startTxAnns(ctx context.Context, period time.Duration, sz int) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(period):
+			case <-time.After(newPeriod):
 			}
 
 			txid := hex.EncodeToString(randBytes(32))
 			rawTx := randBytes(sz)
-			n.txi.storeTx(txid, rawTx)
+			n.mp.storeTx(txid, rawTx)
 
 			// log.Printf("announcing txid %v", txid)
 			n.announceTx(ctx, txid, rawTx, n.host.ID())
+		}
+	}()
+
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(reannouncePeriod):
+			}
+
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+
+			n.mp.mtx.RLock()
+			defer n.mp.mtx.RUnlock()
+			log.Printf("re-announcing unconfirmed tnxs (%d)", len(n.mp.txns))
+			for txid, rawTx := range n.mp.txns {
+				n.announceTx(ctx, txid, rawTx, n.host.ID())
+				if ctx.Err() != nil {
+					// This is a sketch hack to avoid blocking mempool writes.
+					// We should instead grab random txns and release the lock,
+					// or otherwise be able to cancel this process if mempool
+					// writes are needed.
+					log.Println("interrupting slow re-broadcast")
+					break
+				}
+			}
+			cancel()
 		}
 	}()
 }
