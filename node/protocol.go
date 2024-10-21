@@ -20,10 +20,18 @@ const (
 	ProtocolIDBlock    protocol.ID = "/kwil/blk/1.0.0"
 	ProtocolIDBlkAnn   protocol.ID = "/kwil/blkann/1.0.0"
 
+	ProtocolIDBlockPropose protocol.ID = "/kwil/blkprop/1.0.0"
+	ProtocolIDACKProposal  protocol.ID = "/kwil/blkack/1.0.0"
+
+	// These prefixes are protocol specific. They are intended to future proof
+	// the protocol handlers so different proto versions can be handled with
+	// shared code.
 	annTxMsgPrefix  = "txann:"
 	getTxMsgPrefix  = "gettx:"
 	annBlkMsgPrefix = "blkann:"
 	getBlkMsgPrefix = "getblk:"
+
+	annPropMsgPrefix = "prop:"
 
 	getMsg = "get" // context dependent, in open stream convo
 )

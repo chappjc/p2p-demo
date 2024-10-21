@@ -39,6 +39,7 @@ type Node struct {
 	txi *transactionIndex
 	bki *blockStore
 	mp  *mempool
+	ce  *consensusEngine
 
 	// pf *prefetch
 

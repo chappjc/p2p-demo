@@ -238,15 +238,7 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 		log.Printf("getblk response had unexpected height: wanted %d, got %d", height, encHeight)
 		return
 	}
-	txHashes := make([][]byte, len(txids))
-	for i := range txids {
-		txHashes[i], err = hex.DecodeString(txids[i])
-		if err != nil {
-			log.Printf("decodeBlock failed for %v: %v", blkid, err)
-			return
-		}
-	}
-	gotBlkHash := hashBlockHeader(ver, height, txHashes)
+	gotBlkHash := hashBlockHeader(ver, height, txids)
 	if !bytes.Equal(gotBlkHash, blkHash) {
 		log.Printf("invalid block hash: wanted %x, got %x", blkHash, gotBlkHash)
 		return
@@ -255,7 +247,8 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	success = true
 
 	log.Printf("confirming %d transactions in block %d (%v)", len(txids), height, blkid)
-	for i, txid := range txids {
+	for i, txHash := range txids {
+		txid := txHash.String()
 		n.txi.storeTx(txid, txns[i]) // add to tx index
 		n.mp.storeTx(txid, nil)      // rm from mempool
 	}
@@ -381,7 +374,7 @@ func encodeBlock(height int64, txids []string, txns [][]byte) (string, []byte, e
 	return hex.EncodeToString(blkHash), rawBlk, nil
 }
 
-func decodeBlock(rawBlk []byte) (version uint16, height int64, txids []string, txns [][]byte, err error) {
+/*func decodeBlock(rawBlk []byte) (version uint16, height int64, txids []string, txns [][]byte, err error) {
 	if len(rawBlk) < 18 { // 2 (version) + 8 (height) + 8 (num txs)
 		return 0, 0, nil, nil, fmt.Errorf("block data too short")
 	}
@@ -424,9 +417,86 @@ func decodeBlock(rawBlk []byte) (version uint16, height int64, txids []string, t
 	}
 
 	return version, height, txids, txns, nil
+}*/
+
+func decodeBlockHeader(r io.Reader) (version uint16, height int64, numTx uint64, txids []Hash, err error) {
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return 0, 0, 0, nil, fmt.Errorf("failed to read version: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &height); err != nil {
+		return 0, 0, 0, nil, fmt.Errorf("failed to read height: %w", err)
+	}
+
+	if err := binary.Read(r, binary.LittleEndian, &numTx); err != nil {
+		return 0, 0, 0, nil, fmt.Errorf("failed to read number of transactions: %w", err)
+	}
+
+	txids = make([]Hash, numTx)
+
+	for i := uint64(0); i < numTx; i++ {
+		txhash := make([]byte, 32)
+		if _, err := io.ReadFull(r, txhash); err != nil {
+			return 0, 0, 0, nil, fmt.Errorf("failed to read tx hash: %w", err)
+		}
+		txids[i], _ = NewHashFromBytes(txhash)
+	}
+
+	return version, height, numTx, txids, nil
 }
 
-func hashBlockHeader(ver uint16, height int64, txHashes [][]byte) []byte {
+func decodeBlockTxns(raw []byte) (txns [][]byte, err error) {
+	rd := bytes.NewReader(raw)
+	for rd.Len() > 0 {
+		var txLen uint64
+		if err := binary.Read(rd, binary.LittleEndian, &txLen); err != nil {
+			return nil, fmt.Errorf("failed to read tx length: %w", err)
+		}
+
+		if txLen > uint64(rd.Len()) {
+			return nil, fmt.Errorf("invalid tx length %d", txLen)
+		}
+		tx := make([]byte, txLen)
+		if _, err := io.ReadFull(rd, tx); err != nil {
+			return nil, fmt.Errorf("failed to read tx data: %w", err)
+		}
+		txns = append(txns, tx)
+	}
+
+	return txns, nil
+}
+
+func decodeBlock(rawBlk []byte) (version uint16, height int64, txids []Hash, txns [][]byte, err error) {
+	if len(rawBlk) < 18 { // 2 (version) + 8 (height) + 8 (num txs)
+		return 0, 0, nil, nil, fmt.Errorf("block data too short")
+	}
+
+	r := bytes.NewReader(rawBlk)
+
+	version, height, numTx, txids, err := decodeBlockHeader(r)
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+
+	txns = make([][]byte, numTx)
+
+	for i := uint64(0); i < numTx; i++ {
+		var txLen uint64
+		if err := binary.Read(r, binary.LittleEndian, &txLen); err != nil {
+			return 0, 0, nil, nil, fmt.Errorf("failed to read tx length: %w", err)
+		}
+
+		tx := make([]byte, txLen)
+		if _, err := io.ReadFull(r, tx); err != nil {
+			return 0, 0, nil, nil, fmt.Errorf("failed to read tx data: %w", err)
+		}
+		txns[i] = tx
+	}
+
+	return version, height, txids, txns, nil
+}
+
+func hashBlockHeader(ver uint16, height int64, txHashes []Hash) []byte {
 	hasher := sha256.New()
 
 	verBts := binary.LittleEndian.AppendUint16(nil, ver)
@@ -439,7 +509,26 @@ func hashBlockHeader(ver uint16, height int64, txHashes [][]byte) []byte {
 	hasher.Write(numTxBts)
 
 	for _, txid := range txHashes {
-		hasher.Write(txid)
+		hasher.Write(txid[:])
+	}
+
+	return hasher.Sum(nil)
+}
+
+func hashBlockHeader2(ver uint16, height int64, txHashes []Hash) []byte {
+	hasher := sha256.New()
+
+	verBts := binary.LittleEndian.AppendUint16(nil, ver)
+	hasher.Write(verBts)
+
+	heightBts := binary.LittleEndian.AppendUint64(nil, uint64(height))
+	hasher.Write(heightBts)
+
+	numTxBts := binary.LittleEndian.AppendUint64(nil, uint64(len(txHashes)))
+	hasher.Write(numTxBts)
+
+	for _, txid := range txHashes {
+		hasher.Write(txid[:])
 	}
 
 	return hasher.Sum(nil)
