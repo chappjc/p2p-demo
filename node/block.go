@@ -196,6 +196,15 @@ func (n *Node) blkAnnStreamHandler(s network.Stream) {
 	}
 	log.Printf("blk announcement received: %q / %d", blkid, height)
 
+	// If we are a validator and this is the commit ann for a proposed block tha
+	// twe already started executing, consensus engine will handle it.
+	// if n.ce.commitProposed(blkid) {
+	// 	return
+	// }
+
+	// Possibly ce will handle it regardless.  For now, below is block store
+	// code like a sentry node might do.
+
 	if !n.bki.preFetch(blkid) {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
 	}
