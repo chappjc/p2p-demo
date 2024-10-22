@@ -43,6 +43,8 @@ type Node struct {
 
 	// pf *prefetch
 
+	ackChan chan ackRes
+
 	host   host.Host
 	pex    bool
 	leader atomic.Bool
@@ -78,12 +80,14 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	}
 
 	node := &Node{
-		host: host,
-		pm:   pm,
-		pex:  pex,
-		txi:  txi,
-		mp:   mp,
-		bki:  blkStr,
+		host:    host,
+		pm:      pm,
+		pex:     pex,
+		txi:     txi,
+		mp:      mp,
+		bki:     blkStr,
+		ce:      &consensusEngine{},
+		ackChan: make(chan ackRes, 1),
 	}
 
 	node.leader.Store(leader)
@@ -92,6 +96,9 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	host.SetStreamHandler(ProtocolIDBlkAnn, node.blkAnnStreamHandler)
 	host.SetStreamHandler(ProtocolIDBlock, node.blkGetStreamHandler)
 	host.SetStreamHandler(ProtocolIDTx, node.txGetStreamHandler)
+
+	host.SetStreamHandler(ProtocolIDBlockPropose, node.blkPropStreamHandler)
+	// host.SetStreamHandler(ProtocolIDACKProposal, node.blkAckStreamHandler)
 
 	return node, nil
 }
