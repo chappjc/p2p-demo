@@ -34,16 +34,45 @@ const (
 	dummyTxInterval = 1 * time.Second
 )
 
+type TxIndex interface {
+	Get(Hash)
+	Store(Hash, []byte)
+}
+
+type BlockStore interface {
+	Get(Hash)
+	Store(Hash, []byte)
+	PreFetch(Hash) // maybe app level instead
+}
+
+type MemPool interface {
+	Size() int
+	Reap(int) ([]Hash, [][]byte)
+	Get(Hash)
+	Set(Hash, []byte)
+	// Check([]byte)
+}
+
+type ConsensusEngine interface {
+	AcceptProposalID(height int64, prevHash Hash) bool
+	ProcessProposal(blk *Block, cb func(ack bool, appHash Hash) error)
+
+	ProcessACK(validatorPK []byte, ack AckRes)
+
+	AcceptCommit(height int64, blkID Hash) bool
+	CommitBlock(blk *Block, appHash Hash) error
+}
+
 type Node struct {
 	pm  *peerMan
 	txi *transactionIndex
 	bki *blockStore
 	mp  *mempool
-	ce  *consensusEngine
+	ce  ConsensusEngine
 
 	// pf *prefetch
 
-	ackChan chan ackRes
+	ackChan chan AckRes // from consensus engine, to gossip to leader
 
 	host   host.Host
 	pex    bool
@@ -80,14 +109,18 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	}
 
 	node := &Node{
-		host:    host,
-		pm:      pm,
-		pex:     pex,
-		txi:     txi,
-		mp:      mp,
-		bki:     blkStr,
-		ce:      &consensusEngine{},
-		ackChan: make(chan ackRes, 1),
+		host: host,
+		pm:   pm,
+		pex:  pex,
+		txi:  txi,
+		mp:   mp,
+		bki:  blkStr,
+		ce: &consensusEngine{
+			bki: blkStr,
+			txi: txi,
+			mp:  mp,
+		},
+		ackChan: make(chan AckRes, 1),
 	}
 
 	node.leader.Store(leader)

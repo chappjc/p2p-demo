@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,8 +26,8 @@ type blkCommit struct {
 type blkProp struct {
 	height int64
 	hash   Hash
-	blk    block
-	resCb  func(ack bool, appHash []byte) error
+	blk    *Block
+	resCb  func(ack bool, appHash Hash) error
 }
 
 type block struct {
@@ -38,9 +38,9 @@ type block struct {
 }
 
 type consensusEngine struct {
-	// bki *blockStore
-	// mp *mempool
-	// txi *transactionIndex
+	bki *blockStore
+	txi *transactionIndex
+	mp  *mempool
 
 	leader atomic.Bool
 
@@ -50,10 +50,15 @@ type consensusEngine struct {
 	// execRes    *blkExecResult
 
 	// as leader, we collect acks for the proposed blocks
-	acks map[peer.ID]ackRes
+	acks []ackFrom
 }
 
-func (ce *consensusEngine) acceptProposalID(height int64, prevHash Hash) bool {
+type ackFrom struct {
+	fromPubKey []byte
+	res        AckRes
+}
+
+func (ce *consensusEngine) AcceptProposalID(height int64, prevHash Hash) bool {
 	if ce.leader.Load() {
 		return false
 	}
@@ -75,48 +80,38 @@ func (ce *consensusEngine) acceptProposalID(height int64, prevHash Hash) bool {
 	return prevHash == ce.lastCommit.hash
 }
 
-func (ce *consensusEngine) processProposal(blk []byte, height int64, prevHash Hash,
-	res func(ack bool, appHash []byte) error) {
+// ProcessProposal handles a full block proposal from the leader. Only a
+// validator should use this method, not leader or sentry. This validates the
+// proposal, ensuring that it is for the next block (by height and previous
+// block hash), and beings executing the block. When execution is complete, the
+// res callback function is called with ACK+appHash/nACK, which in the context
+// of the node will send the outcome back to the leader where validator
+// responses are tallied.
+func (ce *consensusEngine) ProcessProposal(blk *Block, res func(ack bool, appHash Hash) error) {
 	if ce.leader.Load() {
 		return
 	}
+
+	ce.mtx.Lock()
+	defer ce.mtx.Unlock()
 
 	if ce.proposed != nil {
 		fmt.Println("block proposal already exists")
 		return
 	}
-	if height != ce.lastCommit.height+1 {
-		log.Printf("proposal for height %d does not follow %d", height, ce.lastCommit.height)
+	if blk.Header.Height != ce.lastCommit.height+1 {
+		log.Printf("proposal for height %d does not follow %d", blk.Header.Height, ce.lastCommit.height)
 		return
 	}
 
-	ver, encHeight, txids, txns, err := decodeBlock(blk)
-	if err != nil {
-		log.Printf("decodeBlock failed for proposal at height %d: %v", height, err)
-		return
-	}
-	if encHeight != height {
-		log.Printf("unexpected height: wanted %d, got %d", height, encHeight)
-		return
-	}
-
-	block := block{
-		ver:      ver,
-		prevHash: prevHash,
-		txids:    txids,
-		txns:     txns,
-	}
-
-	blkHash := hashBlockHeader(ver, height, txids)
+	blkHash := blk.Header.Hash()
 
 	// we will then begin execution, and later report with ack/nack
 
-	ce.mtx.Lock()
-	defer ce.mtx.Unlock()
 	ce.proposed = &blkProp{
-		height: height,
-		hash:   Hash(blkHash),
-		blk:    block,
+		height: blk.Header.Height,
+		hash:   blkHash,
+		blk:    blk,
 		resCb:  res,
 	}
 
@@ -128,6 +123,72 @@ func (ce *consensusEngine) processProposal(blk []byte, height int64, prevHash Ha
 
 	// ce should have some handle to p2p, like a function or channel into an
 	// outgoing p2p msg loop.
+}
+
+// AcceptCommit is used for a validator to handle a committed block
+// announcement. The result should indicate if if the block should be fetched.
+// This will return false when ANY of the following are the case:
+//
+//  1. (validator) we had the proposed block, which we will commit when ready
+//  2. this is not the next block in our local store
+//
+// This will return true if we should fetch the block, which is the case if BOTH
+// we did not have a proposal for this block, and it is the next in our block store.
+func (ce *consensusEngine) AcceptCommit(height int64, blkHash Hash) (fetch bool) {
+	if ce.proposed != nil && ce.proposed.hash == blkHash {
+		// this should signal for CE to commit the block once it is executed.
+		return false
+	}
+	if height != ce.lastCommit.height+1 {
+		return false
+	}
+	blkID := blkHash.String()
+	return !ce.bki.have(blkID)
+}
+
+// CommitBlock reports a full block to commit. This would be used when:
+//  1. retrieval of a block following in an announcement for a new+next block
+//  2. iterative block retrieval in catch-up / sync
+func (ce *consensusEngine) CommitBlock(blk *Block, appHash Hash) error {
+	height := blk.Header.Height
+	if ce.proposed == nil {
+		// execute and commit if it is next
+		if height != ce.lastCommit.height+1 {
+			return fmt.Errorf("block at height %d does not follow %d", height, ce.lastCommit.height)
+		}
+		// TODO: execute and commit
+		return nil
+	}
+
+	if ce.proposed.height != height {
+		return fmt.Errorf("block at height %d does not match existing proposed block at %d", height, ce.proposed.height)
+	}
+
+	blkHash := blk.Header.Hash()
+	if ce.proposed.hash != blkHash {
+		return fmt.Errorf("block at height %d with hash %v does not match hash of existing proposed block %d",
+			blkHash, ce.proposed.hash)
+	}
+
+	// TODO: flag OK to commit ce.proposed.blk (with expected apphash)
+
+	return nil
+}
+
+func (ce *consensusEngine) confirmBlkTxns(blk *Block) {
+	blkid := blk.Header.Hash().String()
+	height := blk.Header.Height
+
+	log.Printf("confirming %d transactions in block %d (%v)", len(blk.Txns), height, blkid)
+	for _, txn := range blk.Txns {
+		txHash := HashBytes(txn)
+		txid := txHash.String()
+		ce.txi.storeTx(txid, txn) // add to tx index
+		ce.mp.storeTx(txid, nil)  // rm from mempool
+	}
+
+	rawBlk := EncodeBlock(blk)
+	ce.bki.store(blkid, height, rawBlk)
 }
 
 // blkPropStreamHandler is the stream handler for the ProtocolIDBlockPropose
@@ -179,7 +240,7 @@ func (n *Node) blkPropStreamHandler(s network.Stream) {
 		return
 	}
 
-	if !n.ce.acceptProposalID(height, prevHash) {
+	if !n.ce.AcceptProposalID(height, prevHash) {
 		return
 	}
 
@@ -198,21 +259,19 @@ func (n *Node) blkPropStreamHandler(s network.Stream) {
 
 	// Q: header first, or full serialized block?
 
-	ver, encHeight, txids, _, err := decodeBlock(blkProp)
+	blk, err := DecodeBlock(blkProp)
 	if err != nil {
 		log.Printf("decodeBlock failed for proposal at height %d: %v", height, err)
 		return
 	}
-	if encHeight != height {
-		log.Printf("unexpected height: wanted %d, got %d", height, encHeight)
+	if blk.Header.Height != height {
+		log.Printf("unexpected height: wanted %d, got %d", height, blk.Header.Height)
 		return
 	}
 
-	blkHash := hashBlockHeader(ver, height, txids)
-	var hash Hash
-	copy(hash[:], blkHash)
+	hash := blk.Header.Hash()
 
-	go n.ce.processProposal(blkProp, height, prevHash, func(ack bool, appHash []byte) error {
+	go n.ce.ProcessProposal(blk, func(ack bool, appHash Hash) error {
 		return n.sendACK(ack, hash, appHash)
 	})
 
@@ -220,9 +279,10 @@ func (n *Node) blkPropStreamHandler(s network.Stream) {
 }
 
 // sendACK is a callback for the result of validator block execution/precommit.
-// After then consensus engine
-func (n *Node) sendACK(ack bool, blkID Hash, appHash []byte) error {
-	n.ackChan <- ackRes{
+// After then consensus engine executes the block, this is used to gossip the
+// result back to the leader.
+func (n *Node) sendACK(ack bool, blkID Hash, appHash Hash) error {
+	n.ackChan <- AckRes{
 		ack:     ack,
 		appHash: appHash,
 		blkID:   blkID,
@@ -230,38 +290,37 @@ func (n *Node) sendACK(ack bool, blkID Hash, appHash []byte) error {
 	return nil // actually gossip the nack
 }
 
-type ackRes struct {
+type AckRes struct {
 	ack     bool
 	blkID   Hash
-	appHash []byte
+	appHash Hash
 }
 
-func (ar ackRes) ACK() string {
+func (ar AckRes) ACK() string {
 	if ar.ack {
 		return "ACK"
 	}
 	return "nACK"
 }
 
-func (ar ackRes) String() string {
+func (ar AckRes) String() string {
 	if ar.ack {
 		return fmt.Sprintf("%s: block %d, appHash %x", ar.ACK(), ar.blkID, ar.appHash)
 	}
 	return ar.ACK()
 }
 
-func (ar ackRes) MarshalBinary() ([]byte, error) {
-	buf := make([]byte, 1+len(ar.blkID)+4+len(ar.appHash))
+func (ar AckRes) MarshalBinary() ([]byte, error) {
+	buf := make([]byte, 1+len(ar.blkID)+len(ar.appHash))
 	if ar.ack {
 		buf[0] = 1
 	}
 	copy(buf[1:], ar.blkID[:])
-	binary.LittleEndian.PutUint32(buf[1+len(ar.blkID):], uint32(len(ar.appHash)))
-	copy(buf[1+len(ar.blkID)+4:], ar.appHash)
+	copy(buf[1+len(ar.blkID)+4:], ar.appHash[:])
 	return buf, nil
 }
 
-func (ar *ackRes) UnmarshalBinary(data []byte) error {
+func (ar *AckRes) UnmarshalBinary(data []byte) error {
 	if len(data) < 1 {
 		return fmt.Errorf("insufficient data")
 	}
@@ -271,16 +330,15 @@ func (ar *ackRes) UnmarshalBinary(data []byte) error {
 			return fmt.Errorf("too much data for nACK")
 		}
 		ar.blkID = Hash{}
-		ar.appHash = nil
+		ar.appHash = Hash{}
 		return nil
 	}
-	if len(data) < 1+len(ar.blkID)+4 {
+	data = data[1:]
+	if len(data) < len(ar.blkID)+len(ar.appHash) {
 		return fmt.Errorf("insufficient data for ACK")
 	}
-	copy(ar.blkID[:], data[1:1+len(ar.blkID)])
-	appHashLen := binary.LittleEndian.Uint32(data[1+len(ar.blkID):])
-	ar.appHash = make([]byte, appHashLen)
-	copy(ar.appHash, data[1+len(ar.blkID)+4:])
+	copy(ar.blkID[:], data[:len(ar.blkID)])
+	copy(ar.appHash[:], data[len(ar.blkID):])
 	return nil
 }
 
@@ -299,13 +357,19 @@ func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
 			topicAck.Close()
 			n.wg.Done()
 		}()
-		for ack := range n.ackChan {
-			ackMsg, _ := ack.MarshalBinary()
-			err := topicAck.Publish(ctx, ackMsg)
-			if err != nil {
-				fmt.Println("Publish:", err)
-				return
+		for {
+			select {
+			case <-ctx.Done():
+			case ack := <-n.ackChan:
+				ackMsg, _ := ack.MarshalBinary()
+				err := topicAck.Publish(ctx, ackMsg)
+				if err != nil {
+					fmt.Println("Publish:", err)
+					// TODO: queue the ack for retry (send back to ackChan or another delayed send queue)
+					return
+				}
 			}
+
 		}
 	}()
 
@@ -317,7 +381,7 @@ func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
 		for {
 			if !n.leader.Load() {
 				subAck.Next(ctx)
-				continue // ignore TODO just don't sub
+				continue // discard, we are just relaying
 			}
 
 			ackMsg, err := subAck.Next(ctx)
@@ -333,7 +397,7 @@ func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
 				continue
 			}
 
-			var ack ackRes
+			var ack AckRes
 			err = ack.UnmarshalBinary(ackMsg.Data)
 			if err != nil {
 				log.Printf("failed to decode ACK msg: %v", err)
@@ -344,21 +408,33 @@ func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
 			log.Printf("received ACK msg from %v (rcvd from %s), data = %x",
 				fromPeerID, ackMsg.ReceivedFrom, ackMsg.Message.Data)
 
-			go n.ce.processACK(fromPeerID, ack)
+			peerPubKey, err := fromPeerID.ExtractPublicKey()
+			if err != nil {
+				log.Printf("failed to extract pubkey from peer ID %v: %v", fromPeerID, err)
+				continue
+			}
+			pubkeyBytes, _ := peerPubKey.Raw() // does not error for secp256k1 or ed25519
+			go n.ce.ProcessACK(pubkeyBytes, ack)
 		}
 	}()
 
 	return nil
 }
 
-func (ce *consensusEngine) processACK(from peer.ID, ack ackRes) {
+func (ce *consensusEngine) ProcessACK(fromPubKey []byte, ack AckRes) {
 	ce.mtx.Lock()
 	defer ce.mtx.Unlock()
-	_, have := ce.acks[from]
-	if have {
-		log.Printf("replacing known ACK from %v: %v", from, ack)
+	idx := slices.IndexFunc(ce.acks, func(r ackFrom) bool {
+		return bytes.Equal(r.fromPubKey, fromPubKey)
+	})
+	af := ackFrom{fromPubKey, ack}
+	if idx == -1 {
+		ce.acks = append(ce.acks, af)
+	} else {
+		log.Printf("replacing known ACK from %x: %v", fromPubKey, ack)
+		ce.acks[idx] = af
 	}
-	ce.acks[from] = ack
+
 	// TODO: again, send to event loop, so this can trigger commit if threshold reached.
 }
 
