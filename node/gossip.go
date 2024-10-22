@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"p2p/node/types"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -43,10 +44,11 @@ func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 			case <-time.After(10 * time.Second):
 			}
 
-			txid := randBytes(32)
-			n.txi.storeTx(hex.EncodeToString(txid), randBytes(10))
+			txHash := randBytes(32)
+			txid := hex.EncodeToString(txHash)
+			n.txi.Store(types.Hash(txHash), randBytes(10))
 			fmt.Printf("announcing txid %x\n", txid)
-			err := topicTx.Publish(ctx, txid)
+			err := topicTx.Publish(ctx, []byte(txid))
 			if err != nil {
 				fmt.Println("Publish:", err)
 				return
@@ -76,7 +78,7 @@ func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 			txid := hex.EncodeToString(txMsg.Data)
 			fromPeerID := txMsg.GetFrom()
 
-			have := n.txi.have(txid)
+			have := n.txi.Get(types.Hash(txMsg.Data)) != nil // danger conversion
 			log.Printf("received tx msg from %v (rcvd from %s), data = %x, already have = %v\n",
 				txMsg.GetFrom(), txMsg.ReceivedFrom, txMsg.Message.Data, have)
 			if have {
@@ -95,7 +97,7 @@ func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 				continue
 			}
 
-			n.txi.storeTx(txid, txRaw)
+			n.txi.Store(types.Hash(txMsg.Data), txRaw) // danger conversion
 
 			// txMsg.ID
 			// txMsg.ReceivedFrom

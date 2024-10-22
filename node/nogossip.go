@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"p2p/node/types"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -32,20 +33,25 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 	}
 	txid := string(req)
 	// log.Printf("tx announcement received: %q", txid)
+	txHash, err := types.NewHashFromString(txid)
+	if err != nil {
+		fmt.Println("bad txid:", err)
+		return
+	}
 
-	if !n.mp.preFetch(txid) { // it's in mempool
+	if !n.mp.PreFetch(txHash) { // it's in mempool
 		return
 	}
 
 	var fetched bool
 	defer func() {
 		if !fetched { // release prefetch
-			n.mp.storeTx(txid, nil)
+			n.mp.Store(txHash, nil)
 		}
 	}()
 
 	// not in mempool, check tx index
-	if n.txi.have(txid) {
+	if n.txi.Get(txHash) != nil {
 		return // we have or are currently fetching it, do nothing, assuming we have already re-announced
 	}
 	// we don't have it. time to fetch
@@ -72,7 +78,7 @@ func (n *Node) txAnnStreamHandler(s network.Stream) {
 	// while we were fetching it
 
 	// store in mempool since it was not in tx index and thus not confirmed
-	n.mp.storeTx(txid, rawTx)
+	n.mp.Store(txHash, rawTx)
 	fetched = true
 
 	// re-announce
@@ -161,9 +167,10 @@ func (n *Node) startTxAnns(ctx context.Context, newPeriod, reannouncePeriod time
 			case <-time.After(newPeriod):
 			}
 
-			txid := hex.EncodeToString(randBytes(32))
+			txHash := randBytes(32)
+			txid := hex.EncodeToString(txHash)
 			rawTx := randBytes(sz)
-			n.mp.storeTx(txid, rawTx)
+			n.mp.Store(types.Hash(txHash), rawTx)
 
 			// log.Printf("announcing txid %v", txid)
 			n.announceTx(ctx, txid, rawTx, n.host.ID())
@@ -182,28 +189,13 @@ func (n *Node) startTxAnns(ctx context.Context, newPeriod, reannouncePeriod time
 			}
 
 			func() {
-				n.mp.mtx.RLock()
-				total := len(n.mp.txns)
-				toSend := min(20, total)
-				txids := make([]string, toSend)
-				txns := make([][]byte, toSend)
-				var i int
-				for txid, rawTx := range n.mp.txns {
-					txids[i] = txid
-					txns[i] = rawTx
-					i++
-					if i >= toSend {
-						break
-					}
-				}
-				n.mp.mtx.RUnlock()
-
 				ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 
-				log.Printf("re-announcing unconfirmed tnxs (%d / %d)", toSend, total)
-				for i, txid := range txids {
-					n.announceTx(ctx, txid, txns[i], n.host.ID()) // response handling is async
+				const sendN = 20
+				log.Printf("re-announcing up to %d unconfirmed txns", sendN)
+				for nt := range n.mp.FeedN(sendN) {
+					n.announceTx(ctx, nt.ID.String(), nt.Tx, n.host.ID()) // response handling is async
 					if ctx.Err() != nil {
 						log.Println("interrupting long re-broadcast")
 						break

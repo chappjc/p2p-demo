@@ -32,6 +32,7 @@ const (
 	getBlkMsgPrefix = "getblk:"
 
 	annPropMsgPrefix = "prop:"
+	annAckMsgPrefix  = "ack:"
 
 	getMsg = "get" // context dependent, in open stream convo
 )

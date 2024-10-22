@@ -9,6 +9,10 @@ import (
 	"io"
 	"log"
 	mrand2 "math/rand/v2"
+	"p2p/node/consensus"
+	"p2p/node/mempool"
+	"p2p/node/store"
+	"p2p/node/types"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -29,47 +33,28 @@ import (
 )
 
 const (
-	blockTxCount    = 50
-	dummyTxSize     = 123_000
-	dummyTxInterval = 1 * time.Second
+	blockTxCount    = 50              // for "mining"
+	dummyTxSize     = 123_000         // for broadcast
+	dummyTxInterval = 1 * time.Second // broadcast freq
 )
 
-type TxIndex interface {
-	Get(Hash)
-	Store(Hash, []byte)
-}
-
-type BlockStore interface {
-	Get(Hash)
-	Store(Hash, []byte)
-	PreFetch(Hash) // maybe app level instead
-}
-
-type MemPool interface {
-	Size() int
-	Reap(int) ([]Hash, [][]byte)
-	Get(Hash)
-	Set(Hash, []byte)
-	// Check([]byte)
-}
-
 type ConsensusEngine interface {
-	AcceptProposalID(height int64, prevHash Hash) bool
-	ProcessProposal(blk *Block, cb func(ack bool, appHash Hash) error)
+	AcceptProposalID(height int64, prevHash types.Hash) bool
+	ProcessProposal(blk *types.Block, cb func(ack bool, appHash types.Hash) error)
 
-	ProcessACK(validatorPK []byte, ack AckRes)
+	ProcessACK(validatorPK []byte, ack types.AckRes)
 
-	AcceptCommit(height int64, blkID Hash) bool
-	CommitBlock(blk *Block, appHash Hash) error
+	AcceptCommit(height int64, blkID types.Hash) bool
+	CommitBlock(blk *types.Block, appHash types.Hash) error
 }
 
 type Node struct {
-	pm  *peerMan
-	txi *transactionIndex
-	bki *blockStore
-	mp  *mempool
+	txi types.TxIndex
+	bki types.BlockStore
+	mp  types.MemPool
 	ce  ConsensusEngine
 
+	pm *peerMan
 	// pf *prefetch
 
 	ackChan chan AckRes // from consensus engine, to gossip to leader
@@ -87,8 +72,8 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	}
 	// n.host.Network().InterfaceListenAddresses() // expands 0.0.0.0
 
-	txi := newTransactionIndex()
-	mp := newMempool()
+	txi := store.NewTransactionIndex()
+	mp := mempool.New()
 
 	pm := &peerMan{h: host}
 	if pex {
@@ -103,23 +88,19 @@ func NewNode(port uint64, privKey []byte, leader, pex bool) (*Node, error) {
 	dir, _ = filepath.Abs(dir)
 	fmt.Println(dir)
 
-	blkStr, err := newBlockStore(dir)
+	blkStr, err := store.NewBlockStore(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	node := &Node{
-		host: host,
-		pm:   pm,
-		pex:  pex,
-		txi:  txi,
-		mp:   mp,
-		bki:  blkStr,
-		ce: &consensusEngine{
-			bki: blkStr,
-			txi: txi,
-			mp:  mp,
-		},
+		host:    host,
+		pm:      pm,
+		pex:     pex,
+		txi:     txi,
+		mp:      mp,
+		bki:     blkStr,
+		ce:      consensus.New(blkStr, txi, mp),
 		ackChan: make(chan AckRes, 1),
 	}
 
@@ -156,6 +137,8 @@ func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 		ProtocolIDTxAnn,
 		ProtocolIDBlock,
 		ProtocolIDBlkAnn,
+		ProtocolIDBlockPropose,
+		ProtocolIDACKProposal,
 		// pubsub.GossipSubID_v12,
 	} {
 		ok, err := checkProtocolSupport(ctx, n.host, peer, pid)
@@ -176,7 +159,7 @@ func (n *Node) mine(ctx context.Context) {
 	var height int64
 	const N = blockTxCount
 	for {
-		if n.mp.size() < N || !n.leader.Load() {
+		if n.mp.Size() < N || !n.leader.Load() {
 			select {
 			case <-ctx.Done():
 				return
@@ -188,18 +171,18 @@ func (n *Node) mine(ctx context.Context) {
 		log.Println("MINED BLOCK -- serializing and announcing!")
 
 		// Reap txns from mempool for the block
-		txids, txns := n.mp.reapN(N)
+		txids, txns := n.mp.ReapN(N)
 
-		var prevHash Hash    // TODO
-		var prevAppHash Hash // TODO
-		blk := NewBlock(0, height, prevHash, prevAppHash, time.Now(), txns)
-		rawBlk := EncodeBlock(blk)
+		var prevHash types.Hash    // TODO
+		var prevAppHash types.Hash // TODO
+		blk := types.NewBlock(0, height, prevHash, prevAppHash, time.Now(), txns)
+		rawBlk := types.EncodeBlock(blk)
 		hash := blk.Header.Hash()
 		blkID := hash.String()
 
 		log.Printf("confirmed %d transactions in block %d (%v)", len(txids), height, blkID)
 
-		n.bki.store(blkID, height, rawBlk)
+		n.bki.Store(hash, height, rawBlk)
 
 		log.Printf("ANNOUNCING BLOCK %v / %d size = %d, txs = %d\n", blkID, height, len(rawBlk), len(txids))
 
@@ -224,9 +207,14 @@ func (n *Node) txGetStreamHandler(s network.Stream) {
 	}
 	txid := string(req)
 	// log.Printf("requested txid: %q", txid)
+	txHash, err := types.NewHashFromString(txid)
+	if err != nil {
+		fmt.Println("bad txid:", err)
+		return
+	}
 
 	// first check mempool
-	rawTx := n.mp.getTx(txid)
+	rawTx := n.mp.Get(txHash)
 	if rawTx != nil {
 		s.Write(rawTx)
 		return
@@ -235,7 +223,7 @@ func (n *Node) txGetStreamHandler(s network.Stream) {
 	// this is racy, and should be different in product
 
 	// then confirmed tx index
-	rawTx = n.txi.getTx(txid)
+	rawTx = n.txi.Get(txHash)
 	if rawTx == nil {
 		s.Write(noData) // don't have it
 	} else {

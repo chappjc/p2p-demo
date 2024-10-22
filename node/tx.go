@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -104,38 +103,4 @@ func (n *Node) getTxWithRetry(ctx context.Context, txid string, baseDelay time.D
 			return nil, ErrTxNotFound
 		}
 	}
-}
-
-type transactionIndex struct {
-	mtx   sync.RWMutex
-	txids map[string][]byte
-}
-
-func newTransactionIndex() *transactionIndex {
-	return &transactionIndex{
-		txids: make(map[string][]byte),
-	}
-}
-
-func (txi *transactionIndex) have(txid string) bool { // this is racy
-	txi.mtx.RLock()
-	defer txi.mtx.RUnlock()
-	_, have := txi.txids[txid]
-	return have
-}
-
-func (txi *transactionIndex) storeTx(txid string, raw []byte) {
-	txi.mtx.Lock()
-	defer txi.mtx.Unlock()
-	if raw == nil {
-		delete(txi.txids, txid)
-		return
-	}
-	txi.txids[txid] = raw
-}
-
-func (txi *transactionIndex) getTx(txid string) []byte {
-	txi.mtx.RLock()
-	defer txi.mtx.RUnlock()
-	return txi.txids[txid]
 }

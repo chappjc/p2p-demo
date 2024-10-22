@@ -1,4 +1,4 @@
-package node
+package types
 
 import (
 	"crypto/sha256"
