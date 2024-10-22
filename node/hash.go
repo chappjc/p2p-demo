@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 )
@@ -10,6 +11,10 @@ const (
 )
 
 type Hash [HashLen]byte
+
+func HashBytes(b []byte) Hash {
+	return sha256.Sum256(b)
+}
 
 // String returns the hexadecimal representation of the hash (always 64 characters)
 func (h Hash) String() string {

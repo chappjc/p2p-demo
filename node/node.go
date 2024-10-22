@@ -157,11 +157,12 @@ func (n *Node) mine(ctx context.Context) {
 		// Reap txns from mempool for the block
 		txids, txns := n.mp.reapN(N)
 
-		blkID, rawBlk, err := encodeBlock(height, txids, txns)
-		if err != nil {
-			log.Printf("encodeBlock: %v", err)
-			return
-		}
+		var prevHash Hash    // TODO
+		var prevAppHash Hash // TODO
+		blk := NewBlock(0, height, prevHash, prevAppHash, time.Now(), txns)
+		rawBlk := EncodeBlock(blk)
+		hash := blk.Header.Hash()
+		blkID := hash.String()
 
 		log.Printf("confirmed %d transactions in block %d (%v)", len(txids), height, blkID)
 
