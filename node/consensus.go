@@ -122,6 +122,89 @@ func (n *Node) sendACK(ack bool, blkID types.Hash, appHash types.Hash) error {
 	return nil // actually gossip the nack
 }
 
+const (
+	TopicACKs = "acks"
+)
+
+func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
+	topicAck, subAck, err := subTopic(ctx, ps, TopicACKs)
+	if err != nil {
+		return err
+	}
+
+	subCanceled := make(chan struct{})
+
+	n.wg.Add(1)
+	go func() {
+		defer func() {
+			<-subCanceled
+			topicAck.Close()
+			n.wg.Done()
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+			case ack := <-n.ackChan:
+				ackMsg, _ := ack.MarshalBinary()
+				err := topicAck.Publish(ctx, ackMsg)
+				if err != nil {
+					fmt.Println("Publish:", err)
+					// TODO: queue the ack for retry (send back to ackChan or another delayed send queue)
+					return
+				}
+			}
+
+		}
+	}()
+
+	me := n.host.ID()
+
+	go func() {
+		defer close(subCanceled)
+		defer subAck.Cancel()
+		for {
+			ackMsg, err := subAck.Next(ctx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					log.Println("subTx.Next:", err)
+				}
+				return
+			}
+
+			// We're only interested if we are the leader.
+			if !n.leader.Load() {
+				continue // discard, we are just relaying to leader
+			}
+
+			if peer.ID(ackMsg.From) == me {
+				// log.Println("message from me ignored")
+				continue
+			}
+
+			var ack AckRes
+			err = ack.UnmarshalBinary(ackMsg.Data)
+			if err != nil {
+				log.Printf("failed to decode ACK msg: %v", err)
+				continue
+			}
+			fromPeerID := ackMsg.GetFrom()
+
+			log.Printf("received ACK msg from %v (rcvd from %s), data = %x",
+				fromPeerID, ackMsg.ReceivedFrom, ackMsg.Message.Data)
+
+			peerPubKey, err := fromPeerID.ExtractPublicKey()
+			if err != nil {
+				log.Printf("failed to extract pubkey from peer ID %v: %v", fromPeerID, err)
+				continue
+			}
+			pubkeyBytes, _ := peerPubKey.Raw() // does not error for secp256k1 or ed25519
+			go n.ce.ProcessACK(pubkeyBytes, ack)
+		}
+	}()
+
+	return nil
+}
+
 /* commented because we're probably going with gossipsub
 func (n *Node) blkAckStreamHandler(s network.Stream) {
 	defer s.Close()
@@ -172,90 +255,3 @@ func (n *Node) blkAckStreamHandler(s network.Stream) {
 	return
 }
 */
-
-func (n *Node) startAckGossip(ctx context.Context, ps *pubsub.PubSub) error {
-	topicAck, subAck, err := subAcks(ctx, ps)
-	if err != nil {
-		return err
-	}
-
-	subCanceled := make(chan struct{})
-
-	n.wg.Add(1)
-	go func() {
-		defer func() {
-			<-subCanceled
-			topicAck.Close()
-			n.wg.Done()
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-			case ack := <-n.ackChan:
-				ackMsg, _ := ack.MarshalBinary()
-				err := topicAck.Publish(ctx, ackMsg)
-				if err != nil {
-					fmt.Println("Publish:", err)
-					// TODO: queue the ack for retry (send back to ackChan or another delayed send queue)
-					return
-				}
-			}
-
-		}
-	}()
-
-	me := n.host.ID()
-
-	go func() {
-		defer close(subCanceled)
-		defer subAck.Cancel()
-		for {
-			if !n.leader.Load() {
-				subAck.Next(ctx)
-				continue // discard, we are just relaying
-			}
-
-			ackMsg, err := subAck.Next(ctx)
-			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					log.Println("subTx.Next:", err)
-				}
-				return
-			}
-
-			if peer.ID(ackMsg.From) == me {
-				// log.Println("message from me ignored")
-				continue
-			}
-
-			var ack AckRes
-			err = ack.UnmarshalBinary(ackMsg.Data)
-			if err != nil {
-				log.Printf("failed to decode ACK msg: %v", err)
-				continue
-			}
-			fromPeerID := ackMsg.GetFrom()
-
-			log.Printf("received ACK msg from %v (rcvd from %s), data = %x",
-				fromPeerID, ackMsg.ReceivedFrom, ackMsg.Message.Data)
-
-			peerPubKey, err := fromPeerID.ExtractPublicKey()
-			if err != nil {
-				log.Printf("failed to extract pubkey from peer ID %v: %v", fromPeerID, err)
-				continue
-			}
-			pubkeyBytes, _ := peerPubKey.Raw() // does not error for secp256k1 or ed25519
-			go n.ce.ProcessACK(pubkeyBytes, ack)
-		}
-	}()
-
-	return nil
-}
-
-const (
-	TopicACKs = "acks"
-)
-
-func subAcks(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
-	return subTopic(ctx, ps, TopicACKs)
-}

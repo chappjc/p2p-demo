@@ -1,11 +1,9 @@
 package consensus
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"p2p/node/types"
-	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -22,26 +20,43 @@ type blkProp struct {
 	resCb  func(ack bool, appHash types.Hash) error
 }
 
-type block struct {
-	ver      uint16
-	prevHash types.Hash
-	txids    []types.Hash
-	txns     [][]byte
+type ackFrom struct {
+	fromPubKey []byte
+	res        types.AckRes
 }
+
+type blkResult struct {
+	commit func() error
+
+	appHash types.Hash
+	txRes   []txResults
+	// other updates for next block...
+}
+
+type txResults struct {
+	Code   uint16
+	Log    string
+	Events []Event
+}
+
+type Event struct{}
 
 type Engine struct {
 	bki types.BlockStore
 	txi types.TxIndex
 	mp  types.MemPool
 
+	exec types.Execution
+
 	leader atomic.Bool
 
 	mtx        sync.RWMutex
 	lastCommit blkCommit
+	validators [][]byte
 	proposed   *blkProp
-	// execRes    *blkExecResult
-
-	// as leader, we collect acks for the proposed blocks
+	prepared   *blkResult
+	// as leader, we collect acks for the proposed block. after ack threshold,
+	// we commit and clear proposed/prepared for next block
 	acks []ackFrom
 }
 
@@ -51,98 +66,6 @@ func New(bs types.BlockStore, txi types.TxIndex, mp types.MemPool) *Engine {
 		txi: txi,
 		mp:  mp,
 	}
-}
-
-type ackFrom struct {
-	fromPubKey []byte
-	res        types.AckRes
-}
-
-func (ce *Engine) AcceptProposalID(height int64, prevHash types.Hash) bool {
-	if ce.leader.Load() {
-		return false
-	}
-
-	ce.mtx.RLock()
-	defer ce.mtx.RUnlock()
-	if ce.proposed != nil {
-		fmt.Println("block proposal already exists")
-		return false
-	}
-	// initial block must precede genesis
-	if height == 1 || prevHash.IsZero() {
-		return ce.lastCommit.hash.IsZero()
-	}
-
-	if height != ce.lastCommit.height+1 {
-		return false
-	}
-	return prevHash == ce.lastCommit.hash
-}
-
-// ProcessProposal handles a full block proposal from the leader. Only a
-// validator should use this method, not leader or sentry. This validates the
-// proposal, ensuring that it is for the next block (by height and previous
-// block hash), and beings executing the block. When execution is complete, the
-// res callback function is called with ACK+appHash/nACK, which in the context
-// of the node will send the outcome back to the leader where validator
-// responses are tallied.
-func (ce *Engine) ProcessProposal(blk *types.Block, res func(ack bool, appHash types.Hash) error) {
-	if ce.leader.Load() {
-		return
-	}
-
-	ce.mtx.Lock()
-	defer ce.mtx.Unlock()
-
-	if ce.proposed != nil {
-		fmt.Println("block proposal already exists")
-		return
-	}
-	if blk.Header.Height != ce.lastCommit.height+1 {
-		log.Printf("proposal for height %d does not follow %d", blk.Header.Height, ce.lastCommit.height)
-		return
-	}
-
-	blkHash := blk.Header.Hash()
-
-	// we will then begin execution, and later report with ack/nack
-
-	ce.proposed = &blkProp{
-		height: blk.Header.Height,
-		hash:   blkHash,
-		blk:    blk,
-		resCb:  res,
-	}
-
-	// OR
-
-	// ce.evtChan <- *&blkProp{...}
-
-	// ce event loop will send ACK+appHash or NACK.
-
-	// ce should have some handle to p2p, like a function or channel into an
-	// outgoing p2p msg loop.
-}
-
-// AcceptCommit is used for a validator to handle a committed block
-// announcement. The result should indicate if if the block should be fetched.
-// This will return false when ANY of the following are the case:
-//
-//  1. (validator) we had the proposed block, which we will commit when ready
-//  2. this is not the next block in our local store
-//
-// This will return true if we should fetch the block, which is the case if BOTH
-// we did not have a proposal for this block, and it is the next in our block store.
-func (ce *Engine) AcceptCommit(height int64, blkHash types.Hash) (fetch bool) {
-	if ce.proposed != nil && ce.proposed.hash == blkHash {
-		// this should signal for CE to commit the block once it is executed.
-		return false
-	}
-	if height != ce.lastCommit.height+1 {
-		return false
-	}
-	return !ce.bki.Have(blkHash)
 }
 
 // CommitBlock reports a full block to commit. This would be used when:
@@ -187,21 +110,4 @@ func (ce *Engine) confirmBlkTxns(blk *types.Block) {
 
 	rawBlk := types.EncodeBlock(blk)
 	ce.bki.Store(blkHash, height, rawBlk)
-}
-
-func (ce *Engine) ProcessACK(fromPubKey []byte, ack types.AckRes) {
-	ce.mtx.Lock()
-	defer ce.mtx.Unlock()
-	idx := slices.IndexFunc(ce.acks, func(r ackFrom) bool {
-		return bytes.Equal(r.fromPubKey, fromPubKey)
-	})
-	af := ackFrom{fromPubKey, ack}
-	if idx == -1 {
-		ce.acks = append(ce.acks, af)
-	} else {
-		log.Printf("replacing known ACK from %x: %v", fromPubKey, ack)
-		ce.acks[idx] = af
-	}
-
-	// TODO: again, send to event loop, so this can trigger commit if threshold reached.
 }

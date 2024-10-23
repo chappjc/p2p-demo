@@ -17,10 +17,31 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 )
 
+func subTopic(_ context.Context, ps *pubsub.PubSub, topic string) (*pubsub.Topic, *pubsub.Subscription, error) {
+	th, err := ps.Join(topic)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sub, err := th.Subscribe()
+	if err != nil {
+		return nil, nil, err
+	}
+	return th, sub, nil
+}
+
 const (
 	TopicTxs  = "txs"
 	TopicBlks = "blks"
 )
+
+func subTxs(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
+	return subTopic(ctx, ps, TopicTxs)
+}
+
+func subBlks(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
+	return subTopic(ctx, ps, TopicBlks)
+}
 
 func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 	topicTx, subTx, err := subTxs(ctx, ps)
@@ -107,29 +128,6 @@ func (n *Node) startTxGossip(ctx context.Context, ps *pubsub.PubSub) error {
 	}()
 
 	return nil
-}
-
-func subTxs(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
-	return subTopic(ctx, ps, TopicTxs)
-}
-
-func subBlks(ctx context.Context, ps *pubsub.PubSub) (*pubsub.Topic, *pubsub.Subscription, error) {
-	return subTopic(ctx, ps, TopicBlks)
-}
-
-func subTopic(_ context.Context, ps *pubsub.PubSub, topic string) (*pubsub.Topic, *pubsub.Subscription, error) {
-	// Join the discovery topic
-	th, err := ps.Join(topic)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Subscribe to the discovery topic
-	sub, err := th.Subscribe()
-	if err != nil {
-		return nil, nil, err
-	}
-	return th, sub, nil
 }
 
 func randBytes(n int) []byte {

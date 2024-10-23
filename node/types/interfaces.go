@@ -22,6 +22,10 @@ type MemPool interface {
 	PreFetch(txid Hash) bool
 }
 
+type Execution interface {
+	ExecBlock(blk *Block) (commit func() error, appHash Hash, err error)
+}
+
 type NamedTx struct {
 	ID Hash
 	Tx []byte
