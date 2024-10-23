@@ -155,6 +155,12 @@ func (n *Node) checkPeerProtos(ctx context.Context, peer peer.ID) error {
 // mine will simulate mining a block by harvesting transactions from the tx
 // index (would be mempool), assembling a block, and advertising it to peers.
 // Only the leader does this.
+//
+// !!!!!!!!!!!!!!!!!!!
+//   - this must become a ConsensusEngine processes.
+//   - CE should reap, assemble, announce, store in ce.proposed
+//   - then CE should execute, store result in ce.prepared
+//   - CE should commit ce.prepared after ack thresh
 func (n *Node) mine(ctx context.Context) {
 	var height int64
 	const N = blockTxCount
