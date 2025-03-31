@@ -1,3 +1,5 @@
+**WARNING**: This repository was an early experiment with libp2p. It is not currently maintained or supported.
+
 # p2p-demo
 
 1. peer exchange w/ simple Discoverer using a normal stream
